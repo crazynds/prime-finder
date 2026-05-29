@@ -72,7 +72,7 @@ static int test_table_vs_direct(void)
 {
     prime_list_t pl = make_test_pl();
     sieve_table_t st = {0};
-    if (sieve_table_build(&st, &pl) != 0) FAIL("sieve_table_build");
+    if (sieve_table_build(&st, 0, &pl) != 0) FAIL("sieve_table_build");
 
     /* Test several (a,b,c) combos */
     long long test_abc[][3] = {
@@ -133,7 +133,7 @@ static int test_periodicity(void)
 {
     prime_list_t pl = make_test_pl();
     sieve_table_t st = {0};
-    sieve_table_build(&st, &pl);
+    sieve_table_build(&st, 0, &pl);
 
     /* For each entry, verify sieve(a,b,c) == sieve(a+L10, b, c) */
     for (int i = 0; i < st.n && i < 3; i++) {
