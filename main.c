@@ -56,6 +56,9 @@ int main(int argc, char **argv)
             c_min = atoll(argv[i]);
     }
 
+    /* Broadcast cpu_p2_only flag to all ranks */
+    MPI_Bcast(&cpu_p2_only, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
     /* All ranks participate: rank 0 broadcasts its hostname so workers can
      * detect co-location and adjust their GPU index accordingly. */
     char my_host[MPI_MAX_PROCESSOR_NAME];
@@ -106,13 +109,18 @@ int main(int argc, char **argv)
         }
         fprintf(stderr, "[rank %d] %s carregado: %u primos\n", world_rank, small_path, small_primes.count);
 
-        /* All workers load gpu_primes — CPU workers use it for Phase 1 CPU fallback */
-        fprintf(stderr, "[rank %d] carregando %s...\n", world_rank, gpu_path);
-        if (prime_list_load(&gpu_primes, gpu_path) != 0) {
-            fprintf(stderr, "[rank %d] failed to load %s\n", world_rank, gpu_path);
-            MPI_Abort(MPI_COMM_WORLD, 1);
+        /* CPU workers with --cpu-phase2-only never do Phase 1, skip large prime file */
+        int need_gpu_primes = is_gpu || !cpu_p2_only;
+        if (need_gpu_primes) {
+            fprintf(stderr, "[rank %d] carregando %s...\n", world_rank, gpu_path);
+            if (prime_list_load(&gpu_primes, gpu_path) != 0) {
+                fprintf(stderr, "[rank %d] failed to load %s\n", world_rank, gpu_path);
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            fprintf(stderr, "[rank %d] %s carregado: %u primos\n", world_rank, gpu_path, gpu_primes.count);
+        } else {
+            fprintf(stderr, "[rank %d] cpu-phase2-only: pulando %s\n", world_rank, gpu_path);
         }
-        fprintf(stderr, "[rank %d] %s carregado: %u primos\n", world_rank, gpu_path, gpu_primes.count);
 
         /* First worker on the node = local_rank 1 if master is co-located,
          * or local_rank 0 otherwise. Only this worker prints progress. */
