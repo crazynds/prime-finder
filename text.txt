@@ -1,0 +1,10 @@
+Gerar um ermip de tamanho ate 100k digitos!!!
+
+
+10**a - k*10**b - j*10**c + -1 
+
+a >= 50k
+a > b > c
+
+1 <= k,j <= 100
+

@@ -1,0 +1,520 @@
+#include "master.h"
+#include "messages.h"
+
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define MAX_WORKERS      4096
+#define MAX_PENDING_CPU  (1 << 16)  /* cpu batch tasks */
+#define MAX_PENDING_GPU  (1 << 16)
+#define MONITOR_INTERVAL_SEC 1
+
+/* ------- simple circular queue ------- */
+typedef struct {
+    void  *data;
+    int    elem_size;
+    int    head, tail, cap;
+} queue_t;
+
+static int queue_init(queue_t *q, int cap, int elem_size) {
+    q->data      = malloc((size_t)cap * elem_size);
+    q->elem_size = elem_size;
+    q->head = q->tail = 0;
+    q->cap   = cap;
+    return q->data ? 0 : -1;
+}
+static int  queue_empty(queue_t *q) { return q->head == q->tail; }
+static int  queue_full(queue_t *q)  { return (q->tail + 1) % q->cap == q->head; }
+static int  queue_size(queue_t *q)  { return (q->tail - q->head + q->cap) % q->cap; }
+static void queue_push(queue_t *q, const void *item) {
+    memcpy((char*)q->data + (size_t)q->tail * q->elem_size, item, q->elem_size);
+    q->tail = (q->tail + 1) % q->cap;
+}
+static void queue_pop(queue_t *q, void *item) {
+    memcpy(item, (char*)q->data + (size_t)q->head * q->elem_size, q->elem_size);
+    q->head = (q->head + 1) % q->cap;
+}
+
+/* ------- task descriptions for monitor ------- */
+#define TASK_IDLE     0
+#define TASK_GPU      1
+#define TASK_CPU      2
+
+typedef struct {
+    int       rank;
+    int       type;        /* WORKER_GPU or WORKER_CPU */
+    int       gpu_index;
+    char      hostname[64];
+    /* current task */
+    int       task_type;   /* TASK_IDLE / TASK_GPU / TASK_CPU */
+    long long ta, tb, tc;
+    int       t_npairs;
+    time_t    task_start;
+} worker_info_t;
+
+/* ------- abc iterator ------- */
+typedef struct {
+    long long a, b, c;
+    long long a_min, a_max, c_min;
+    int done;
+} abc_iter_t;
+
+static long long b_max_for_a(long long a) { return a * 2 / 3; }
+
+static void abc_iter_init(abc_iter_t *it,
+                          long long a_min, long long a_max, long long c_min)
+{
+    it->a_min = a_min; it->a_max = a_max; it->c_min = c_min;
+    it->a = a_min;
+    it->b = b_max_for_a(a_min);
+    it->c = c_min;
+    it->done = (a_min > a_max);
+}
+
+static int abc_iter_next(abc_iter_t *it, long long *a, long long *b, long long *c)
+{
+    if (it->done) return 0;
+    *a = it->a; *b = it->b; *c = it->c;
+
+    it->c++;
+    if (it->c >= it->b) {
+        it->c = it->c_min;
+        it->b--;
+        if (it->b <= it->c_min) {
+            it->a++;
+            if (it->a > it->a_max) { it->done = 1; return 1; }
+            it->b = b_max_for_a(it->a);
+        }
+    }
+    return 1;
+}
+
+/* ------- ring buffers for last-N results ------- */
+#define HISTORY_SIZE 20
+
+typedef struct {
+    long long a, b, c;
+    int n_survivors;
+} p1_hist_t;
+
+typedef struct {
+    long long a, b, c;
+    int n_pairs, n_pp, n_both;
+} p2_hist_t;
+
+typedef struct {
+    long long a, b, c;
+    int k, j;
+} found_hist_t;
+
+typedef struct {
+    p1_hist_t    p1[HISTORY_SIZE];
+    p2_hist_t    p2[HISTORY_SIZE];
+    found_hist_t found[HISTORY_SIZE];
+    int p1_head, p1_count;
+    int p2_head, p2_count;
+    int found_head, found_count;
+    long long total_p1, total_p2, total_found;
+} history_t;
+
+static void hist_push_p1(history_t *h, long long a, long long b, long long c, int surv) {
+    h->p1[h->p1_head] = (p1_hist_t){a, b, c, surv};
+    h->p1_head = (h->p1_head + 1) % HISTORY_SIZE;
+    if (h->p1_count < HISTORY_SIZE) h->p1_count++;
+    h->total_p1++;
+}
+static void hist_push_p2(history_t *h, long long a, long long b, long long c, int pairs, int pp, int both) {
+    h->p2[h->p2_head] = (p2_hist_t){a, b, c, pairs, pp, both};
+    h->p2_head = (h->p2_head + 1) % HISTORY_SIZE;
+    if (h->p2_count < HISTORY_SIZE) h->p2_count++;
+    h->total_p2++;
+}
+static void hist_push_found(history_t *h, long long a, long long b, long long c, int k, int j) {
+    h->found[h->found_head] = (found_hist_t){a, b, c, k, j};
+    h->found_head = (h->found_head + 1) % HISTORY_SIZE;
+    if (h->found_count < HISTORY_SIZE) h->found_count++;
+    h->total_found++;
+}
+
+/* ------- monitor writer ------- */
+static void write_monitor(const char *path,
+                          worker_info_t *workers, int nw,
+                          int phase1_q_size, int phase2_q_size,
+                          long long a_min, long long a_max, long long c_min,
+                          int iter_done,
+                          const history_t *hist)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+
+    time_t now = time(NULL);
+    char tbuf[32];
+    strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
+
+    fprintf(f, "=== prime_hunter monitor  %s ===\n\n", tbuf);
+    fprintf(f, "Search range: a=[%lld,%lld]  c_min=%lld  iterator=%s\n\n",
+            a_min, a_max, c_min, iter_done ? "DONE" : "running");
+    fprintf(f, "Queue status:  Phase 1 pending=%-6d  Phase 2 pending=%-6d\n",
+            phase1_q_size, phase2_q_size);
+    fprintf(f, "Totals:        Phase 1 done=%-8lld  Phase 2 done=%-8lld  Found=%-6lld\n\n",
+            hist->total_p1, hist->total_p2, hist->total_found);
+
+    /* ---- workers ---- */
+    char seen[MAX_WORKERS][64];
+    int  n_seen = 0;
+
+    for (int i = 0; i < nw; i++) {
+        const char *h = workers[i].hostname;
+        int found = 0;
+        for (int s = 0; s < n_seen; s++)
+            if (strcmp(seen[s], h) == 0) { found = 1; break; }
+        if (!found) strncpy(seen[n_seen++], h, 63);
+    }
+
+    for (int s = 0; s < n_seen; s++) {
+        fprintf(f, "Machine: %s\n", seen[s]);
+        fprintf(f, "  %-6s %-4s %-6s %-10s %-8s  task\n",
+                "rank", "type", "device", "status", "elapsed");
+        fprintf(f, "  %s\n", "------------------------------------------------------");
+
+        for (int i = 0; i < nw; i++) {
+            worker_info_t *w = &workers[i];
+            if (strcmp(w->hostname, seen[s]) != 0) continue;
+
+            const char *type_str = (w->type == WORKER_GPU) ? "GPU" : "CPU";
+            char dev_str[16];
+            if (w->type == WORKER_GPU)
+                snprintf(dev_str, sizeof(dev_str), "gpu%d", w->gpu_index);
+            else
+                strcpy(dev_str, "-");
+
+            char elapsed_str[16];
+            if (w->task_type == TASK_IDLE) {
+                strcpy(elapsed_str, "-");
+            } else {
+                long secs = (long)(now - w->task_start);
+                snprintf(elapsed_str, sizeof(elapsed_str), "%lds", secs);
+            }
+
+            char task_str[128];
+            if (w->task_type == TASK_IDLE) {
+                strcpy(task_str, "idle");
+            } else if (w->task_type == TASK_GPU) {
+                snprintf(task_str, sizeof(task_str),
+                         "Phase1  a=%lld b=%lld c=%lld",
+                         w->ta, w->tb, w->tc);
+            } else {
+                snprintf(task_str, sizeof(task_str),
+                         "Phase2  a=%lld b=%lld c=%lld  ixj=%d",
+                         w->ta, w->tb, w->tc, w->t_npairs);
+            }
+
+            fprintf(f, "  %-6d %-4s %-6s %-10s %-8s  %s\n",
+                    w->rank, type_str, dev_str,
+                    w->task_type == TASK_IDLE ? "idle" : "busy",
+                    elapsed_str, task_str);
+        }
+        fprintf(f, "\n");
+    }
+
+    /* ---- three-column history ---- */
+#define C1W 44
+#define C2W 54
+#define C3W 40
+
+    fprintf(f, "%-*s  %-*s  %-*s\n",
+            C1W, "--- Phase 1 (last 20) ---",
+            C2W, "--- Phase 2 (last 20) ---",
+            C3W, "--- Candidates found ---");
+    fprintf(f, "%-*s  %-*s  %-*s\n",
+            C1W, "a  b  c  survivors",
+            C2W, "a  b  c  pairs  pp  both",
+            C3W, "a  b  c  k  j");
+
+    int rows = HISTORY_SIZE;
+    for (int r = 0; r < rows; r++) {
+        char c1[C1W+1], c2[C2W+1], c3[C3W+1];
+        c1[0] = c2[0] = c3[0] = '\0';
+
+        /* newest first: index = (head - 1 - r + SIZE) % SIZE */
+        int i1 = (hist->p1_head - 1 - r + HISTORY_SIZE) % HISTORY_SIZE;
+        if (r < hist->p1_count) {
+            const p1_hist_t *e = &hist->p1[i1];
+            snprintf(c1, sizeof(c1), "a=%-6lld b=%-6lld c=%-6lld surv=%-5d",
+                     e->a, e->b, e->c, e->n_survivors);
+        }
+
+        int i2 = (hist->p2_head - 1 - r + HISTORY_SIZE) % HISTORY_SIZE;
+        if (r < hist->p2_count) {
+            const p2_hist_t *e = &hist->p2[i2];
+            snprintf(c2, sizeof(c2), "a=%-6lld b=%-6lld c=%-6lld p=%-5d pp=%-4d b=%-3d",
+                     e->a, e->b, e->c, e->n_pairs, e->n_pp, e->n_both);
+        }
+
+        int i3 = (hist->found_head - 1 - r + HISTORY_SIZE) % HISTORY_SIZE;
+        if (r < hist->found_count) {
+            const found_hist_t *e = &hist->found[i3];
+            snprintf(c3, sizeof(c3), "a=%-6lld b=%-6lld c=%-6lld k=%-3d j=%-3d",
+                     e->a, e->b, e->c, e->k, e->j);
+        }
+
+        fprintf(f, "%-*s  %-*s  %-*s\n", C1W, c1, C2W, c2, C3W, c3);
+    }
+
+    fclose(f);
+}
+
+/* ------- send helpers ------- */
+static worker_info_t *find_worker(worker_info_t *workers, int nw, int rank)
+{
+    for (int i = 0; i < nw; i++)
+        if (workers[i].rank == rank) return &workers[i];
+    return NULL;
+}
+
+static void send_gpu_task(int rank, long long a, long long b, long long c,
+                          worker_info_t *workers, int nw)
+{
+    fprintf(stderr, "[master] → rank %d GPU  a=%lld b=%lld c=%lld\n", rank, a, b, c);
+    gpu_task_t t = { a, b, c };
+    MPI_Send(&t, sizeof(t), MPI_BYTE, rank, TAG_GPU_TASK, MPI_COMM_WORLD);
+
+    worker_info_t *w = find_worker(workers, nw, rank);
+    if (w) {
+        w->task_type = TASK_GPU;
+        w->ta = a; w->tb = b; w->tc = c;
+        w->t_npairs = 0;
+        w->task_start = time(NULL);
+    }
+}
+
+static void send_cpu_task(int rank, const cpu_task_t *t,
+                          worker_info_t *workers, int nw)
+{
+    fprintf(stderr, "[master] → rank %d MR   a=%lld b=%lld c=%lld ixj=%d\n",
+            rank, t->a, t->b, t->c, t->n_pairs);
+    MPI_Send(t, sizeof(*t), MPI_BYTE, rank, TAG_CPU_TASK, MPI_COMM_WORLD);
+
+    worker_info_t *w = find_worker(workers, nw, rank);
+    if (w) {
+        w->task_type = TASK_CPU;
+        w->ta = t->a; w->tb = t->b; w->tc = t->c;
+        w->t_npairs = t->n_pairs;
+        w->task_start = time(NULL);
+    }
+}
+
+static void send_terminate(int rank)
+{
+    char dummy = 0;
+    MPI_Send(&dummy, 1, MPI_BYTE, rank, TAG_TERMINATE, MPI_COMM_WORLD);
+}
+
+/* ------- master main loop ------- */
+void master_run(long long a_min, long long a_max, long long c_min, int nworkers)
+{
+    FILE *f1 = fopen("phase1_survivors.txt", "a");
+    FILE *f2 = fopen("phase2_primes.txt", "a");
+    if (!f1 || !f2) { perror("fopen output"); return; }
+
+    worker_info_t workers[MAX_WORKERS];
+    int n_registered = 0;
+
+    history_t hist;
+    memset(&hist, 0, sizeof(hist));
+
+    queue_t phase1_q, phase2_q;
+    queue_init(&phase1_q, MAX_PENDING_GPU, sizeof(gpu_task_t));
+    queue_init(&phase2_q, MAX_PENDING_CPU, sizeof(cpu_task_t));
+
+    abc_iter_t it;
+    abc_iter_init(&it, a_min, a_max, c_min);
+
+    int gpu_free[MAX_WORKERS], n_gpu_free = 0;
+    int cpu_free[MAX_WORKERS], n_cpu_free = 0;
+    int terminated = 0;
+
+    time_t last_monitor = 0;
+
+    char rbuf[sizeof(cpu_result_t) > sizeof(gpu_result_t)
+              ? sizeof(cpu_result_t) : sizeof(gpu_result_t)];
+
+    while (terminated < nworkers) {
+        /* Non-blocking check so monitor can update even when no messages arrive */
+        MPI_Status status;
+        int flag = 0;
+        MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
+
+        if (flag) {
+            MPI_Recv(rbuf, sizeof(rbuf), MPI_BYTE, status.MPI_SOURCE, status.MPI_TAG,
+                     MPI_COMM_WORLD, &status);
+            int src = status.MPI_SOURCE;
+
+            if (status.MPI_TAG == TAG_REGISTER) {
+                msg_register_t *reg = (msg_register_t *)rbuf;
+                worker_info_t *w = &workers[n_registered++];
+                w->rank      = src;
+                w->type      = reg->type;
+                w->gpu_index = reg->gpu_index;
+                strncpy(w->hostname, reg->hostname, sizeof(w->hostname)-1);
+                w->task_type = TASK_IDLE;
+
+                fprintf(stderr, "[master] registered rank %d (%s) host=%s gpu=%d\n",
+                        src,
+                        reg->type == WORKER_GPU ? "GPU" : "CPU",
+                        reg->hostname, reg->gpu_index);
+
+                if (reg->type == WORKER_GPU) gpu_free[n_gpu_free++] = src;
+                else                          cpu_free[n_cpu_free++] = src;
+
+            } else if (status.MPI_TAG == TAG_GPU_RESULT) {
+                gpu_result_t *res = (gpu_result_t *)rbuf;
+                /*
+                fprintf(stderr, "[master] rank %d done GPU a=%lld b=%lld c=%lld → %d survivors\n",
+                        src, res->a, res->b, res->c, res->n_survivors);
+                **/
+                worker_info_t *w = find_worker(workers, n_registered, src);
+                if (w) w->task_type = TASK_IDLE;
+
+                hist_push_p1(&hist, res->a, res->b, res->c, res->n_survivors);
+
+                if (res->n_survivors > 0) {
+                    for (int i = 0; i < res->n_survivors; i++)
+                        fprintf(f1, "a=%lld b=%lld c=%lld k=%d j=%d\n",
+                                res->a, res->b, res->c, res->ks[i], res->js[i]);
+                    fflush(f1);
+
+                    if (!queue_full(&phase2_q)) {
+                        cpu_task_t ct;
+                        ct.a = res->a; ct.b = res->b; ct.c = res->c;
+                        ct.n_pairs = res->n_survivors;
+                        memcpy(ct.ks, res->ks, res->n_survivors);
+                        memcpy(ct.js, res->js, res->n_survivors);
+                        queue_push(&phase2_q, &ct);
+                    }
+                }
+                /* Return sender to correct free list based on worker type */
+                {
+                    int wtype = WORKER_GPU;
+                    for (int i = 0; i < n_registered; i++)
+                        if (workers[i].rank == src) { wtype = workers[i].type; break; }
+                    if (wtype == WORKER_GPU) gpu_free[n_gpu_free++] = src;
+                    else                      cpu_free[n_cpu_free++] = src;
+                }
+
+            } else if (status.MPI_TAG == TAG_CPU_RESULT) {
+                cpu_result_t *res = (cpu_result_t *)rbuf;
+                /*
+                fprintf(stderr, "[master] rank %d done MR  a=%lld b=%lld c=%lld ixj=%d pp=%d both=%d\n",
+                        src, res->a, res->b, res->c,
+                        res->n_pairs, res->n_probable_prime, res->n_both_prime);
+                */
+                worker_info_t *w = find_worker(workers, n_registered, src);
+                if (w) w->task_type = TASK_IDLE;
+
+                hist_push_p2(&hist, res->a, res->b, res->c,
+                             res->n_pairs, res->n_probable_prime, res->n_both_prime);
+
+                /* Only record pairs where BOTH N and rev(N) are probable primes */
+                for (int i = 0; i < res->n_pairs; i++) {
+                    if (res->results[i] == 2) {
+                        fprintf(f2, "a=%lld b=%lld c=%lld k=%d j=%d PROBABLE_PRIME_BOTH\n",
+                                res->a, res->b, res->c, res->ks[i], res->js[i]);
+                        hist_push_found(&hist, res->a, res->b, res->c, res->ks[i], res->js[i]);
+                    } else if (res->results[i] == 3) {
+                        fprintf(f2, "a=%lld b=%lld c=%lld k=%d j=%d PRIME\n",
+                                res->a, res->b, res->c, res->ks[i], res->js[i]);
+                        hist_push_found(&hist, res->a, res->b, res->c, res->ks[i], res->js[i]);
+                    }
+                }
+                if (res->n_both_prime > 0 || res->n_probable_prime > 0) fflush(f2);
+
+                int wtype = WORKER_CPU;
+                for (int i = 0; i < n_registered; i++)
+                    if (workers[i].rank == src) { wtype = workers[i].type; break; }
+
+                if (wtype == WORKER_GPU) gpu_free[n_gpu_free++] = src;
+                else                      cpu_free[n_cpu_free++] = src;
+            }
+        }
+
+        /* Refill phase1_q from iterator */
+        if (queue_empty(&phase1_q) && !it.done) {
+            long long a, b, c;
+            while (!queue_full(&phase1_q) && abc_iter_next(&it, &a, &b, &c)) {
+                gpu_task_t t = { a, b, c };
+                queue_push(&phase1_q, &t);
+            }
+        }
+
+        /* --- GPU workers: prefer Phase 1, steal Phase 2 if Phase 1 empty --- */
+        while (n_gpu_free > 0) {
+            if (!queue_empty(&phase1_q)) {
+                gpu_task_t t;
+                queue_pop(&phase1_q, &t);
+                send_gpu_task(gpu_free[--n_gpu_free], t.a, t.b, t.c, workers, n_registered);
+            } else if (!queue_empty(&phase2_q)) {
+                cpu_task_t t;
+                queue_pop(&phase2_q, &t);
+                send_cpu_task(gpu_free[--n_gpu_free], &t, workers, n_registered);
+            } else {
+                break;
+            }
+        }
+
+        /* --- CPU workers: prefer Phase 2, steal Phase 1 if Phase 2 empty --- */
+        while (n_cpu_free > 0) {
+            if (!queue_empty(&phase2_q)) {
+                cpu_task_t t;
+                queue_pop(&phase2_q, &t);
+                send_cpu_task(cpu_free[--n_cpu_free], &t, workers, n_registered);
+            } else if (!queue_empty(&phase1_q)) {
+                gpu_task_t t;
+                queue_pop(&phase1_q, &t);
+                send_gpu_task(cpu_free[--n_cpu_free], t.a, t.b, t.c, workers, n_registered);
+            } else {
+                break;
+            }
+        }
+
+        /* Terminate when all work done */
+        if (it.done && queue_empty(&phase1_q) && queue_empty(&phase2_q)) {
+            while (n_gpu_free > 0) {
+                send_terminate(gpu_free[--n_gpu_free]);
+                terminated++;
+            }
+            while (n_cpu_free > 0) {
+                send_terminate(cpu_free[--n_cpu_free]);
+                terminated++;
+            }
+        }
+
+        /* Write monitor every second */
+        time_t now = time(NULL);
+        if (now - last_monitor >= MONITOR_INTERVAL_SEC) {
+            write_monitor("monitor.txt",
+                          workers, n_registered,
+                          queue_size(&phase1_q), queue_size(&phase2_q),
+                          a_min, a_max, c_min, it.done, &hist);
+            last_monitor = now;
+        }
+
+        /* Brief sleep to avoid busy-waiting when no messages */
+        if (!flag) {
+            struct timespec ts = { 0, 10000000 };  /* 10ms */
+            nanosleep(&ts, NULL);
+        }
+    }
+
+    /* Final monitor update */
+    write_monitor("monitor.txt", workers, n_registered, 0, 0,
+                  a_min, a_max, c_min, 1, &hist);
+
+    free(phase1_q.data);
+    free(phase2_q.data);
+    fclose(f1);
+    fclose(f2);
+}

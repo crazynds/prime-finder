@@ -1,0 +1,24 @@
+# Build artifacts
+build/
+
+# Generated prime files (large, regenerate with gen_primes)
+*.bin
+
+# Output files
+phase1_survivors.txt
+phase2_primes.txt
+monitor.txt
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Others
+deploy.sh
