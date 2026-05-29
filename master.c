@@ -8,8 +8,8 @@
 #include <time.h>
 
 #define MAX_WORKERS      4096
-#define MAX_PENDING_CPU  (1 << 16)  /* cpu batch tasks */
-#define MAX_PENDING_GPU  (1 << 16)
+#define MAX_PENDING_CPU  512   /* cpu batch tasks  (~10 MB: 512 × 20 KB each) */
+#define MAX_PENDING_GPU  (1 << 16)  /* gpu tasks are tiny (24 bytes each) */
 #define MONITOR_INTERVAL_SEC 1
 
 /* ------- simple circular queue ------- */
@@ -314,7 +314,8 @@ static void send_terminate(int rank)
 }
 
 /* ------- master main loop ------- */
-void master_run(long long a_min, long long a_max, long long c_min, int nworkers)
+void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
+                int cpu_phase2_only)
 {
     FILE *f1 = fopen("phase1_survivors.txt", "a");
     FILE *f2 = fopen("phase2_primes.txt", "a");
@@ -465,13 +466,13 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers)
             }
         }
 
-        /* --- CPU workers: prefer Phase 2, steal Phase 1 if Phase 2 empty --- */
+        /* --- CPU workers: prefer Phase 2, steal Phase 1 if Phase 2 empty (unless restricted) --- */
         while (n_cpu_free > 0) {
             if (!queue_empty(&phase2_q)) {
                 cpu_task_t t;
                 queue_pop(&phase2_q, &t);
                 send_cpu_task(cpu_free[--n_cpu_free], &t, workers, n_registered);
-            } else if (!queue_empty(&phase1_q)) {
+            } else if (!cpu_phase2_only && !queue_empty(&phase1_q)) {
                 gpu_task_t t;
                 queue_pop(&phase1_q, &t);
                 send_gpu_task(cpu_free[--n_cpu_free], t.a, t.b, t.c, workers, n_registered);

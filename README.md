@@ -37,6 +37,12 @@ sudo apt install libopenmpi-dev libgmp-dev cmake build-essential
 # CUDA: follow https://developer.nvidia.com/cuda-downloads
 ```
 
+> **CUDA 11.x + GCC 12 incompatibility**: if cmake fails with *"unsupported GNU version"*, install gcc-11:
+> ```bash
+> sudo apt install gcc-11 g++-11
+> ```
+> CMakeLists.txt detects gcc-11 automatically and uses it as the CUDA host compiler.
+
 ### Install on Fedora/RHEL
 
 ```bash

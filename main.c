@@ -16,11 +16,12 @@
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage: %s <small_primes.bin> <gpu_primes.bin> <a_min> <a_max> [c_min]\n"
-        "  small_primes.bin  : primes for sieve table (phase 0)\n"
-        "  gpu_primes.bin    : primes for GPU trial division (phase 1)\n"
-        "  a_min, a_max      : exponent range (>= 50000)\n"
-        "  c_min             : minimum c (default 100)\n",
+        "Usage: %s <small_primes.bin> <gpu_primes.bin> <a_min> <a_max> [c_min] [--cpu-phase2-only]\n"
+        "  small_primes.bin   : primes for sieve table (phase 0)\n"
+        "  gpu_primes.bin     : primes for GPU trial division (phase 1)\n"
+        "  a_min, a_max       : exponent range (>= 50000)\n"
+        "  c_min              : minimum c (default 100)\n"
+        "  --cpu-phase2-only  : CPU workers only run Phase 2 (Miller-Rabin), never steal Phase 1\n",
         prog);
 }
 
@@ -41,11 +42,19 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    const char *small_path = argv[1];
-    const char *gpu_path   = argv[2];
-    long long   a_min      = atoll(argv[3]);
-    long long   a_max      = atoll(argv[4]);
-    long long   c_min      = (argc >= 6) ? atoll(argv[5]) : 100;
+    const char *small_path    = argv[1];
+    const char *gpu_path      = argv[2];
+    long long   a_min         = atoll(argv[3]);
+    long long   a_max         = atoll(argv[4]);
+    long long   c_min         = 100;
+    int         cpu_p2_only   = 0;
+
+    for (int i = 5; i < argc; i++) {
+        if (strcmp(argv[i], "--cpu-phase2-only") == 0)
+            cpu_p2_only = 1;
+        else
+            c_min = atoll(argv[i]);
+    }
 
     /* All ranks participate: rank 0 broadcasts its hostname so workers can
      * detect co-location and adjust their GPU index accordingly. */
@@ -66,9 +75,9 @@ int main(int argc, char **argv)
 
     if (world_rank == 0) {
         MPI_Comm_free(&node_comm);  /* master doesn't use node_comm */
-        fprintf(stderr, "[master] world_size=%d a=[%lld,%lld] c_min=%lld\n",
-                world_size, a_min, a_max, c_min);
-        master_run(a_min, a_max, c_min, world_size - 1);
+        fprintf(stderr, "[master] world_size=%d a=[%lld,%lld] c_min=%lld cpu_phase2_only=%d\n",
+                world_size, a_min, a_max, c_min, cpu_p2_only);
+        master_run(a_min, a_max, c_min, world_size - 1, cpu_p2_only);
     } else {
         int local_rank = 0;
         const char *lr = getenv("OMPI_COMM_WORLD_LOCAL_RANK");

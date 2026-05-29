@@ -1,4 +1,21 @@
 cmake_minimum_required(VERSION 3.18)
+
+# CUDA 11.x supports GCC <= 11. If the system default is newer, try gcc-11.
+find_program(GCC11 gcc-11)
+if(GCC11)
+    set(CMAKE_CUDA_HOST_COMPILER "${GCC11}")
+    set(CMAKE_C_COMPILER         "${GCC11}")
+    find_program(GPP11 g++-11)
+    if(GPP11)
+        set(CMAKE_CXX_COMPILER "${GPP11}")
+    endif()
+    message(STATUS "CUDA host compiler forced to ${GCC11} (system GCC may be > 11)")
+else()
+    # gcc-11 not found — allow nvcc to use the unsupported version
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler")
+    message(STATUS "gcc-11 not found; using -allow-unsupported-compiler")
+endif()
+
 project(PrimeHunter LANGUAGES C CXX CUDA)
 
 set(CMAKE_C_STANDARD 11)
