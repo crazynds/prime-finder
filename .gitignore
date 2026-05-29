@@ -8,6 +8,7 @@ build/
 phase1_survivors.txt
 phase2_primes.txt
 monitor.txt
+checkpoint.txt
 
 # Editor/IDE
 .vscode/

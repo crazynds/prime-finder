@@ -267,6 +267,56 @@ static void write_monitor(const char *path,
     fclose(f);
 }
 
+/* ------- checkpoint ------- */
+#define CHECKPOINT_FILE "checkpoint.txt"
+#define CHECKPOINT_INTERVAL_SEC 30
+
+static void checkpoint_save(long long a_min, long long a_max, long long c_min,
+                             long long last_a, long long last_b, long long last_c)
+{
+    FILE *f = fopen(CHECKPOINT_FILE, "w");
+    if (!f) return;
+    fprintf(f, "a_min=%lld a_max=%lld c_min=%lld\n", a_min, a_max, c_min);
+    fprintf(f, "last=%lld %lld %lld\n", last_a, last_b, last_c);
+    fclose(f);
+}
+
+/* Returns 1 if checkpoint loaded and valid, sets *ra/*rb/*rc to resume after that point */
+static int checkpoint_load(long long a_min, long long a_max, long long c_min,
+                            long long *ra, long long *rb, long long *rc)
+{
+    FILE *f = fopen(CHECKPOINT_FILE, "r");
+    if (!f) return 0;
+
+    long long fa_min, fa_max, fc_min, la, lb, lc;
+    if (fscanf(f, "a_min=%lld a_max=%lld c_min=%lld\n", &fa_min, &fa_max, &fc_min) != 3 ||
+        fscanf(f, "last=%lld %lld %lld\n", &la, &lb, &lc) != 3) {
+        fclose(f); return 0;
+    }
+    fclose(f);
+
+    if (fa_min != a_min || fa_max != a_max || fc_min != c_min) {
+        fprintf(stderr, "[master] checkpoint ignorado: parametros diferentes\n");
+        return 0;
+    }
+
+    *ra = la; *rb = lb; *rc = lc;
+    return 1;
+}
+
+/* Fast-forward iterator past (skip_a, skip_b, skip_c) */
+static void abc_iter_skip_to(abc_iter_t *it,
+                              long long skip_a, long long skip_b, long long skip_c)
+{
+    long long a, b, c;
+    while (!it->done) {
+        if (it->a > skip_a) break;
+        if (it->a == skip_a && it->b < skip_b) break;
+        if (it->a == skip_a && it->b == skip_b && it->c > skip_c) break;
+        abc_iter_next(it, &a, &b, &c);
+    }
+}
+
 /* ------- send helpers ------- */
 static worker_info_t *find_worker(worker_info_t *workers, int nw, int rank)
 {
@@ -334,6 +384,19 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
     abc_iter_t it;
     abc_iter_init(&it, a_min, a_max, c_min);
 
+    /* Resume from checkpoint if available */
+    {
+        long long ck_a, ck_b, ck_c;
+        if (checkpoint_load(a_min, a_max, c_min, &ck_a, &ck_b, &ck_c)) {
+            fprintf(stderr, "[master] retomando do checkpoint: a=%lld b=%lld c=%lld\n",
+                    ck_a, ck_b, ck_c);
+            abc_iter_skip_to(&it, ck_a, ck_b, ck_c);
+        }
+    }
+
+    long long last_ckpt_a = -1, last_ckpt_b = -1, last_ckpt_c = -1;
+    time_t last_checkpoint = 0;
+
     int gpu_free[MAX_WORKERS], n_gpu_free = 0;
     int cpu_free[MAX_WORKERS], n_cpu_free = 0;
     int terminated = 0;
@@ -381,6 +444,7 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
                 if (w) w->task_type = TASK_IDLE;
 
                 hist_push_p1(&hist, res->a, res->b, res->c, res->n_survivors);
+                last_ckpt_a = res->a; last_ckpt_b = res->b; last_ckpt_c = res->c;
 
                 if (res->n_survivors > 0) {
                     for (int i = 0; i < res->n_survivors; i++)
@@ -493,8 +557,14 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
             }
         }
 
-        /* Write monitor every second */
+        /* Write checkpoint every 30 seconds */
         time_t now = time(NULL);
+        if (last_ckpt_a >= 0 && now - last_checkpoint >= CHECKPOINT_INTERVAL_SEC) {
+            checkpoint_save(a_min, a_max, c_min, last_ckpt_a, last_ckpt_b, last_ckpt_c);
+            last_checkpoint = now;
+        }
+
+        /* Write monitor every second */
         if (now - last_monitor >= MONITOR_INTERVAL_SEC) {
             write_monitor("monitor.txt",
                           workers, n_registered,
