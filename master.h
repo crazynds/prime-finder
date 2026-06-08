@@ -8,5 +8,6 @@
  * nworkers:    total MPI world size - 1
  */
 /* cpu_phase2_only: if non-zero, CPU workers only run Phase 2 (never steal Phase 1) */
-void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
+void master_run(const char *small_primes_path,
+                long long a_min, long long a_max, long long c_min, int nworkers,
                 int cpu_phase2_only);

@@ -3,9 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "messages.h"
 #include "prime_list.h"
-#include "sieve_table.h"
 #include "worker.h"
 #include "master.h"
 
@@ -80,7 +78,7 @@ int main(int argc, char **argv)
         MPI_Comm_free(&node_comm);  /* master doesn't use node_comm */
         fprintf(stderr, "[master] world_size=%d a=[%lld,%lld] c_min=%lld cpu_phase2_only=%d\n",
                 world_size, a_min, a_max, c_min, cpu_p2_only);
-        master_run(a_min, a_max, c_min, world_size - 1, cpu_p2_only);
+        master_run(small_path, a_min, a_max, c_min, world_size - 1, cpu_p2_only);
     } else {
         int local_rank = 0;
         const char *lr = getenv("OMPI_COMM_WORLD_LOCAL_RANK");
@@ -98,18 +96,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "[rank %d] local_rank=%d ngpus=%d gpu_index=%d role=%s\n",
                 world_rank, local_rank, ngpus, gpu_index, is_gpu ? "GPU" : "CPU");
 
-        /* Load prime lists */
-        prime_list_t small_primes = {0};
-        prime_list_t gpu_primes   = {0};
-
-        fprintf(stderr, "[rank %d] carregando %s...\n", world_rank, small_path);
-        if (prime_list_load(&small_primes, small_path) != 0) {
-            fprintf(stderr, "[rank %d] failed to load %s\n", world_rank, small_path);
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        fprintf(stderr, "[rank %d] %s carregado: %u primos\n", world_rank, small_path, small_primes.count);
-
-        /* CPU workers with --cpu-phase2-only never do Phase 1, skip large prime file */
+        /* Workers only need gpu_primes for Phase 1.
+         * CPU workers with --cpu-phase2-only skip it entirely. */
+        prime_list_t gpu_primes = {0};
         int need_gpu_primes = is_gpu || !cpu_p2_only;
         if (need_gpu_primes) {
             fprintf(stderr, "[rank %d] carregando %s...\n", world_rank, gpu_path);
@@ -122,30 +111,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "[rank %d] cpu-phase2-only: pulando %s\n", world_rank, gpu_path);
         }
 
-        /* First worker on the node = local_rank 1 if master is co-located,
-         * or local_rank 0 otherwise. Only this worker prints progress. */
-        int is_first_on_node = master_colocated ? (local_rank == 1) : (local_rank == 0);
+        worker_run(&gpu_primes, &gpu_primes, is_gpu, gpu_index);
 
-        sieve_table_t st = {0};
-        if (is_first_on_node) {
-            size_t flat_size = sieve_table_flat_size(&small_primes);
-            fprintf(stderr, "[rank %d] *** INICIANDO BUILD DA TABELA SIEVE (%.2f MB) ***\n",
-                    world_rank, flat_size / (1024.0 * 1024.0));
-        }
-        if (sieve_table_build(&st, is_first_on_node, &small_primes) != 0) {
-            fprintf(stderr, "[rank %d] sieve_table_build failed\n", world_rank);
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        if (is_first_on_node)
-            fprintf(stderr, "[rank %d] sieve table pronto: %d entradas\n",
-                    world_rank, st.n);
-
-        worker_run(&gpu_primes, &gpu_primes, &st, is_gpu, gpu_index);
-
-        sieve_table_free(&st);
         MPI_Comm_free(&node_comm);
-        prime_list_free(&small_primes);
-        if (is_gpu) prime_list_free(&gpu_primes);
+        if (need_gpu_primes) prime_list_free(&gpu_primes);
     }
 
     MPI_Finalize();

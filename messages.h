@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "sieve_table.h"  /* for KJ_WORDS */
 
 /* MPI tags */
 #define TAG_REGISTER   1
@@ -24,6 +25,7 @@ typedef struct {
 
 typedef struct {
     long long a, b, c;
+    uint32_t sieve_bits[KJ_WORDS];  /* pre-applied Phase 0 bitmask from master */
 } gpu_task_t;
 
 typedef struct {
@@ -33,27 +35,21 @@ typedef struct {
     uint8_t js[MAX_SURVIVORS];  /* j values 1-100 */
 } gpu_result_t;
 
-/* One batch: all survivors for a given (a,b,c) sent to one CPU worker */
+/* One single (a,b,c,k,j) pair for Phase 2 Miller-Rabin */
 typedef struct {
     long long a, b, c;
-    int n_pairs;
-    uint8_t ks[MAX_SURVIVORS];
-    uint8_t js[MAX_SURVIVORS];
+    uint8_t k, j;
 } cpu_task_t;
 
 typedef struct {
     long long a, b, c;
-    int n_pairs;
-    int n_probable_prime;     /* N probable prime (result >= 1) */
-    int n_both_prime;         /* N AND rev(N) probable prime (result == 2) */
-    uint8_t ks[MAX_SURVIVORS];
-    uint8_t js[MAX_SURVIVORS];
+    uint8_t k, j;
     /*
-     * results[i]:
+     * result:
      *   0 = N composite
      *   1 = N probable prime, rev(N) composite
      *   2 = N AND rev(N) both probable prime  ← target
      *   3 = N definitely prime (small N)
      */
-    uint8_t results[MAX_SURVIVORS];
+    uint8_t result;
 } cpu_result_t;

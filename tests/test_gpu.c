@@ -155,7 +155,7 @@ static int test_gpu_consistency(const prime_list_t *pl, long long a, long long b
     return 0;
 }
 
-int main(void)
+int run_gpu_tests(void)
 {
     uint32_t p_data[] = {
         3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97
@@ -173,5 +173,5 @@ int main(void)
 
     if (fail == 0) printf("GPU tests PASSED\n");
     else           printf("%d GPU test(s) FAILED\n", fail);
-    return fail ? 1 : 0;
+    return fail;
 }

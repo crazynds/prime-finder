@@ -73,20 +73,16 @@ int miller_rabin_test(long long a, long long b, long long c, int k, int j)
 
     build_N(N, tmp, a, b, c, k, j);
 
-    int r_N = mpz_probab_prime_p(N, 25);
+    int r_N = mpz_probab_prime_p(N, 5);
     if (r_N == 0) {
         mpz_clear(N); mpz_clear(tmp);
         return 0;
     }
-    // if (r_N == 2) {
-    //     mpz_clear(N); mpz_clear(tmp);
-    //     return 3;  /* definitely prime (small N only) */
-    // }
 
     /* N is probable prime — test rev(N) */
     build_revN(N, tmp, a, b, c, k, j);  /* reuse N to save memory */
 
-    int r_R = mpz_probab_prime_p(N, 25);
+    int r_R = mpz_probab_prime_p(N, 5);
 
     mpz_clear(N); mpz_clear(tmp);
 

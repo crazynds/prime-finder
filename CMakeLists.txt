@@ -69,76 +69,39 @@ set_target_properties(prime_hunter PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
-# ----- tests -----
+# ----- unified test + bench runner -----
 enable_testing()
 
-add_executable(test_suite
+add_executable(prime_tests
+    tests/runner.cu
     tests/test_main.c
     tests/test_math.c
     tests/test_sieve.c
     tests/test_phase2.c
+    tests/test_gpu.c
+    tests/bench_miller_rabin.c
+    tests/bench_gpu.cu
     prime_list.c
     sieve_table.c
     sieve.c
     miller_rabin.c
-)
-
-target_include_directories(test_suite PRIVATE
-    ${GMP_INCLUDE}
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_link_libraries(test_suite
-    ${GMP_LIB}
-    m
-)
-
-add_test(NAME unit_tests COMMAND test_suite)
-
-# ----- GPU test (needs CUDA) -----
-add_executable(test_gpu
-    tests/test_gpu.c
-    prime_list.c
-    sieve_table.c
-    sieve.c
     trial_div.cu
 )
 
-target_include_directories(test_gpu PRIVATE
+target_include_directories(prime_tests PRIVATE
     ${GMP_INCLUDE}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(test_gpu
+target_link_libraries(prime_tests
     CUDA::cudart
     ${GMP_LIB}
     m
 )
 
-set_target_properties(test_gpu PROPERTIES
+set_target_properties(prime_tests PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
-add_test(NAME gpu_tests COMMAND test_gpu)
-
-# ----- GPU benchmark -----
-add_library(prime_list_obj OBJECT prime_list.c)
-
-add_executable(bench_gpu
-    bench_gpu.cu
-    trial_div.cu
-    $<TARGET_OBJECTS:prime_list_obj>
-)
-
-target_include_directories(bench_gpu PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_link_libraries(bench_gpu
-    CUDA::cudart
-    m
-)
-
-set_target_properties(bench_gpu PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-)
+add_test(NAME unit_tests COMMAND prime_tests --test)
+add_test(NAME gpu_tests  COMMAND prime_tests --test)

@@ -1,6 +1,5 @@
 #include "worker.h"
 #include "messages.h"
-#include "sieve.h"
 #include "trial_div.h"
 #include "trial_div_cpu.h"
 #include "miller_rabin.h"
@@ -16,7 +15,6 @@ static int world_rank;
 static void do_gpu_task(const prime_list_t *gpu_primes,
                         const prime_list_t *cpu_p1_primes,
                         int use_gpu,
-                        const sieve_table_t *st,
                         const gpu_task_t *task,
                         gpu_result_t *result)
 {
@@ -30,10 +28,9 @@ static void do_gpu_task(const prime_list_t *gpu_primes,
     fprintf(stderr, "[rank %d] Phase 1 - Starting %s task a=%lld b=%lld c=%lld\n",
             world_rank, use_gpu ? "GPU" : "CPU", task->a, task->b, task->c);
 
+    /* sieve_bits pre-computed by master (Phase 0) */
     uint32_t bits[KJ_WORDS];
-    memset(bits, 0, sizeof(bits));
-
-    sieve_apply(st, task->a, task->b, task->c, bits);
+    memcpy(bits, task->sieve_bits, sizeof(bits));
 
     if (!sieve_all_eliminated(bits)) {
         if (use_gpu) {
@@ -67,34 +64,13 @@ static void do_cpu_task(const cpu_task_t *task, cpu_result_t *result)
     result->a = task->a;
     result->b = task->b;
     result->c = task->c;
-    result->n_pairs = task->n_pairs;
-    result->n_probable_prime = 0;
-    result->n_both_prime = 0;
-
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    fprintf(stderr, "[rank %d] Phase 2 - Starting MR task a=%lld b=%lld c=%lld ixj=%d\n",
-            world_rank, task->a, task->b, task->c, task->n_pairs);
-
-    for (int i = 0; i < task->n_pairs; i++) {
-        result->ks[i] = task->ks[i];
-        result->js[i] = task->js[i];
-        int r = miller_rabin_test(task->a, task->b, task->c, task->ks[i], task->js[i]);
-        result->results[i] = (uint8_t)r;
-        if (r >= 1) result->n_probable_prime++;
-        if (r == 2) result->n_both_prime++;
-    }
-
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    double elapsed2 = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
-    fprintf(stderr, "[rank %d] End Phase 2 - a=%lld b=%lld c=%lld ixj=%d pp=%d both=%d time=%.3fs\n",
-            world_rank, task->a, task->b, task->c,
-            task->n_pairs, result->n_probable_prime, result->n_both_prime, elapsed2);
+    result->k = task->k;
+    result->j = task->j;
+    result->result = (uint8_t)miller_rabin_test(task->a, task->b, task->c, task->k, task->j);
 }
 
 void worker_run(const prime_list_t *gpu_primes,
                 const prime_list_t *cpu_p1_primes,
-                const sieve_table_t *sieve_table,
                 int is_gpu_worker,
                 int gpu_index)
 {
@@ -126,7 +102,7 @@ void worker_run(const prime_list_t *gpu_primes,
             gpu_result_t result;
             memcpy(&task, buf, sizeof(task));
             /* GPU workers use CUDA; CPU workers use CPU fallback */
-            do_gpu_task(gpu_primes, cpu_p1_primes, is_gpu_worker, sieve_table, &task, &result);
+            do_gpu_task(gpu_primes, cpu_p1_primes, is_gpu_worker, &task, &result);
             MPI_Send(&result, sizeof(result), MPI_BYTE, 0, TAG_GPU_RESULT, MPI_COMM_WORLD);
         } else if (status.MPI_TAG == TAG_CPU_TASK) {
             cpu_task_t   task;

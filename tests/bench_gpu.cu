@@ -69,19 +69,13 @@ static double bench_one(const prime_list_t *pl,
     return (double)ms / n_runs;
 }
 
-int main(int argc, char **argv)
+int bench_gpu_run(const char *primes_path, long long a, long long b, long long c)
 {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <primes.bin> [a] [b] [c]\n", argv[0]);
+    prime_list_t pl;
+    if (prime_list_load(&pl, primes_path) != 0) {
+        fprintf(stderr, "bench_gpu: failed to load %s\n", primes_path);
         return 1;
     }
-
-    prime_list_t pl;
-    if (prime_list_load(&pl, argv[1]) != 0) return 1;
-
-    long long a = (argc > 2) ? atoll(argv[2]) : 50000;
-    long long b = (argc > 3) ? atoll(argv[3]) : 33333;
-    long long c = (argc > 4) ? atoll(argv[4]) : 200;
 
     printf("Primes: %u  a=%lld b=%lld c=%lld\n\n", pl.count, a, b, c);
     printf("%-12s  %-10s  %-16s  %-8s\n",

@@ -6,7 +6,7 @@ int test_math(void);
 int test_sieve(void);
 int test_phase2(void);
 
-int main(void)
+int run_unit_tests(void)
 {
     int fail = 0;
     fail += test_math();
@@ -14,8 +14,8 @@ int main(void)
     fail += test_phase2();
 
     if (fail == 0)
-        printf("All tests PASSED\n");
+        printf("All unit tests PASSED\n");
     else
-        printf("%d test(s) FAILED\n", fail);
-    return fail ? 1 : 0;
+        printf("%d unit test(s) FAILED\n", fail);
+    return fail;
 }

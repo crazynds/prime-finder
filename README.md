@@ -113,18 +113,35 @@ While running, `watch -n1 cat monitor.txt` shows:
 - Last 20 Phase 2 results (a, b, c, pairs tested, probable primes, both-prime count)
 - All candidates found so far (a, b, c, k, j)
 
-## GPU benchmark
+## Checkpointing
+
+The master saves progress every 30 seconds to `checkpoint.txt` (iterator position)
+and `checkpoint_phase2.txt` (pending Phase 2 pairs). On restart with the same
+parameters the run resumes automatically from where it left off.
+
+## Tests and benchmarks
+
+All tests and benchmarks are compiled into a single `prime_tests` binary:
 
 ```bash
 cd build
-./bench_gpu small_primes.bin primes_1e8.bin 200
+
+# Run all tests (unit + GPU)
+./prime_tests --test
+
+# Run benchmarks (Miller-Rabin only)
+./prime_tests --bench
+
+# Run benchmarks including GPU throughput benchmark
+./prime_tests --bench primes_1e8.bin [a b c]
 ```
 
-Tries different CUDA block sizes and prints timing so you can pick the fastest for your GPU.
-
-## Tests
+`ctest` also runs `--test` automatically:
 
 ```bash
 cd build
 ctest -V
 ```
+
+The GPU benchmark tries different CUDA block sizes and prints timing, helping
+you pick the fastest for your GPU via `-DTRIAL_DIV_BLOCK_SIZE=<n>` in cmake.

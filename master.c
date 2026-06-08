@@ -1,5 +1,8 @@
 #include "master.h"
 #include "messages.h"
+#include "prime_list.h"
+#include "sieve_table.h"
+#include "sieve.h"
 
 #include <mpi.h>
 #include <stdio.h>
@@ -8,8 +11,8 @@
 #include <time.h>
 
 #define MAX_WORKERS      4096
-#define MAX_PENDING_CPU  512   /* cpu batch tasks  (~10 MB: 512 × 20 KB each) */
-#define MAX_PENDING_GPU  (1 << 16)  /* gpu tasks are tiny (24 bytes each) */
+#define MAX_PENDING_CPU  500000 /* individual (a,b,c,k,j) pairs (~12 MB: 500k × 24 B each) */
+#define MAX_PENDING_GPU  1024   /* gpu tasks with sieve_bits (~1.3 MB: 1024 × ~1.3 KB each) */
 #define MONITOR_INTERVAL_SEC 1
 
 /* ------- simple circular queue ------- */
@@ -51,7 +54,7 @@ typedef struct {
     /* current task */
     int       task_type;   /* TASK_IDLE / TASK_GPU / TASK_CPU */
     long long ta, tb, tc;
-    int       t_npairs;
+    int       tk, tj;
     time_t    task_start;
 } worker_info_t;
 
@@ -208,8 +211,8 @@ static void write_monitor(const char *path,
                          w->ta, w->tb, w->tc);
             } else {
                 snprintf(task_str, sizeof(task_str),
-                         "Phase2  a=%lld b=%lld c=%lld  ixj=%d",
-                         w->ta, w->tb, w->tc, w->t_npairs);
+                         "Phase2  a=%lld b=%lld c=%lld  k=%d j=%d",
+                         w->ta, w->tb, w->tc, w->tk, w->tj);
             }
 
             fprintf(f, "  %-6d %-4s %-6s %-10s %-8s  %s\n",
@@ -268,7 +271,8 @@ static void write_monitor(const char *path,
 }
 
 /* ------- checkpoint ------- */
-#define CHECKPOINT_FILE "checkpoint.txt"
+#define CHECKPOINT_FILE       "checkpoint.txt"
+#define CHECKPOINT_PHASE2_FILE "checkpoint_phase2.txt"
 #define CHECKPOINT_INTERVAL_SEC 30
 
 static void checkpoint_save(long long a_min, long long a_max, long long c_min,
@@ -279,6 +283,47 @@ static void checkpoint_save(long long a_min, long long a_max, long long c_min,
     fprintf(f, "a_min=%lld a_max=%lld c_min=%lld\n", a_min, a_max, c_min);
     fprintf(f, "last=%lld %lld %lld\n", last_a, last_b, last_c);
     fclose(f);
+}
+
+/* Dump all items in phase2_q to disk without consuming the queue */
+static void checkpoint_save_phase2(const queue_t *q)
+{
+    FILE *f = fopen(CHECKPOINT_PHASE2_FILE, "w");
+    if (!f) return;
+    int n = queue_size((queue_t *)q);
+    fprintf(f, "n=%d\n", n);
+    for (int i = 0; i < n; i++) {
+        int idx = (q->head + i) % q->cap;
+        const cpu_task_t *t = (const cpu_task_t *)((const char *)q->data + (size_t)idx * q->elem_size);
+        fprintf(f, "%lld %lld %lld %d %d\n", t->a, t->b, t->c, (int)t->k, (int)t->j);
+    }
+    fclose(f);
+}
+
+/* Restore phase2 pending items into q; returns number of items loaded */
+static int checkpoint_load_phase2(queue_t *q)
+{
+    FILE *f = fopen(CHECKPOINT_PHASE2_FILE, "r");
+    if (!f) return 0;
+
+    int n = 0;
+    if (fscanf(f, "n=%d\n", &n) != 1) { fclose(f); return 0; }
+
+    int loaded = 0;
+    for (int i = 0; i < n; i++) {
+        long long a, b, c;
+        int k, j;
+        if (fscanf(f, "%lld %lld %lld %d %d\n", &a, &b, &c, &k, &j) != 5) break;
+        if (queue_full(q)) break;
+        cpu_task_t t = { a, b, c, (uint8_t)k, (uint8_t)j };
+        queue_push(q, &t);
+        loaded++;
+    }
+    fclose(f);
+
+    if (loaded > 0)
+        fprintf(stderr, "[master] fase 2 restaurada: %d pares pendentes\n", loaded);
+    return loaded;
 }
 
 /* Returns 1 if checkpoint loaded and valid, sets *ra/*rb/*rc to resume after that point */
@@ -336,7 +381,7 @@ static void send_gpu_task(int rank, long long a, long long b, long long c,
     if (w) {
         w->task_type = TASK_GPU;
         w->ta = a; w->tb = b; w->tc = c;
-        w->t_npairs = 0;
+        w->tk = 0; w->tj = 0;
         w->task_start = time(NULL);
     }
 }
@@ -344,15 +389,13 @@ static void send_gpu_task(int rank, long long a, long long b, long long c,
 static void send_cpu_task(int rank, const cpu_task_t *t,
                           worker_info_t *workers, int nw)
 {
-    fprintf(stderr, "[master] → rank %d MR   a=%lld b=%lld c=%lld ixj=%d\n",
-            rank, t->a, t->b, t->c, t->n_pairs);
     MPI_Send(t, sizeof(*t), MPI_BYTE, rank, TAG_CPU_TASK, MPI_COMM_WORLD);
 
     worker_info_t *w = find_worker(workers, nw, rank);
     if (w) {
         w->task_type = TASK_CPU;
         w->ta = t->a; w->tb = t->b; w->tc = t->c;
-        w->t_npairs = t->n_pairs;
+        w->tk = t->k; w->tj = t->j;
         w->task_start = time(NULL);
     }
 }
@@ -364,12 +407,29 @@ static void send_terminate(int rank)
 }
 
 /* ------- master main loop ------- */
-void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
+void master_run(const char *small_primes_path,
+                long long a_min, long long a_max, long long c_min, int nworkers,
                 int cpu_phase2_only)
 {
     FILE *f1 = fopen("phase1_survivors.txt", "a");
     FILE *f2 = fopen("phase2_primes.txt", "a");
     if (!f1 || !f2) { perror("fopen output"); return; }
+
+    /* Master owns the sieve table — workers receive pre-applied bits in each task */
+    prime_list_t small_primes = {0};
+    if (prime_list_load(&small_primes, small_primes_path) != 0) {
+        fprintf(stderr, "[master] failed to load %s\n", small_primes_path);
+        return;
+    }
+    sieve_table_t st = {0};
+    fprintf(stderr, "[master] building sieve table (%u primes)...\n", small_primes.count);
+    if (sieve_table_build(&st, 0, &small_primes) != 0) {
+        fprintf(stderr, "[master] sieve_table_build failed\n");
+        prime_list_free(&small_primes);
+        return;
+    }
+    fprintf(stderr, "[master] sieve table ready: %d entries\n", st.n);
+    prime_list_free(&small_primes);
 
     worker_info_t workers[MAX_WORKERS];
     int n_registered = 0;
@@ -391,6 +451,7 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
             fprintf(stderr, "[master] retomando do checkpoint: a=%lld b=%lld c=%lld\n",
                     ck_a, ck_b, ck_c);
             abc_iter_skip_to(&it, ck_a, ck_b, ck_c);
+            checkpoint_load_phase2(&phase2_q);
         }
     }
 
@@ -426,10 +487,12 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
                 strncpy(w->hostname, reg->hostname, sizeof(w->hostname)-1);
                 w->task_type = TASK_IDLE;
 
-                fprintf(stderr, "[master] registered rank %d (%s) host=%s gpu=%d\n",
-                        src,
-                        reg->type == WORKER_GPU ? "GPU" : "CPU",
-                        reg->hostname, reg->gpu_index);
+                if (reg->type == WORKER_GPU)
+                    fprintf(stderr, "[master] registered rank %d (GPU) host=%s gpu=%d\n",
+                            src, reg->hostname, reg->gpu_index);
+                else
+                    fprintf(stderr, "[master] registered rank %d (CPU) host=%s\n",
+                            src, reg->hostname);
 
                 if (reg->type == WORKER_GPU) gpu_free[n_gpu_free++] = src;
                 else                          cpu_free[n_cpu_free++] = src;
@@ -452,12 +515,12 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
                                 res->a, res->b, res->c, res->ks[i], res->js[i]);
                     fflush(f1);
 
-                    if (!queue_full(&phase2_q)) {
+                    for (int i = 0; i < res->n_survivors; i++) {
+                        if (queue_full(&phase2_q)) break;
                         cpu_task_t ct;
                         ct.a = res->a; ct.b = res->b; ct.c = res->c;
-                        ct.n_pairs = res->n_survivors;
-                        memcpy(ct.ks, res->ks, res->n_survivors);
-                        memcpy(ct.js, res->js, res->n_survivors);
+                        ct.k = res->ks[i];
+                        ct.j = res->js[i];
                         queue_push(&phase2_q, &ct);
                     }
                 }
@@ -472,30 +535,25 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
 
             } else if (status.MPI_TAG == TAG_CPU_RESULT) {
                 cpu_result_t *res = (cpu_result_t *)rbuf;
-                /*
-                fprintf(stderr, "[master] rank %d done MR  a=%lld b=%lld c=%lld ixj=%d pp=%d both=%d\n",
-                        src, res->a, res->b, res->c,
-                        res->n_pairs, res->n_probable_prime, res->n_both_prime);
-                */
                 worker_info_t *w = find_worker(workers, n_registered, src);
                 if (w) w->task_type = TASK_IDLE;
 
-                hist_push_p2(&hist, res->a, res->b, res->c,
-                             res->n_pairs, res->n_probable_prime, res->n_both_prime);
-
-                /* Only record pairs where BOTH N and rev(N) are probable primes */
-                for (int i = 0; i < res->n_pairs; i++) {
-                    if (res->results[i] == 2) {
-                        fprintf(f2, "a=%lld b=%lld c=%lld k=%d j=%d PROBABLE_PRIME_BOTH\n",
-                                res->a, res->b, res->c, res->ks[i], res->js[i]);
-                        hist_push_found(&hist, res->a, res->b, res->c, res->ks[i], res->js[i]);
-                    } else if (res->results[i] == 3) {
-                        fprintf(f2, "a=%lld b=%lld c=%lld k=%d j=%d PRIME\n",
-                                res->a, res->b, res->c, res->ks[i], res->js[i]);
-                        hist_push_found(&hist, res->a, res->b, res->c, res->ks[i], res->js[i]);
-                    }
+                if (res->result >= 1) {
+                    int both = (res->result == 2) ? 1 : 0;
+                    hist_push_p2(&hist, res->a, res->b, res->c, 1, 1, both);
                 }
-                if (res->n_both_prime > 0 || res->n_probable_prime > 0) fflush(f2);
+
+                if (res->result == 2) {
+                    fprintf(f2, "a=%lld b=%lld c=%lld k=%d j=%d PROBABLE_PRIME_BOTH\n",
+                            res->a, res->b, res->c, res->k, res->j);
+                    hist_push_found(&hist, res->a, res->b, res->c, res->k, res->j);
+                    fflush(f2);
+                } else if (res->result == 3) {
+                    fprintf(f2, "a=%lld b=%lld c=%lld k=%d j=%d PRIME\n",
+                            res->a, res->b, res->c, res->k, res->j);
+                    hist_push_found(&hist, res->a, res->b, res->c, res->k, res->j);
+                    fflush(f2);
+                }
 
                 int wtype = WORKER_CPU;
                 for (int i = 0; i < n_registered; i++)
@@ -507,10 +565,13 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
         }
 
         /* Refill phase1_q from iterator */
-        if (queue_empty(&phase1_q) && !it.done) {
+        if (!queue_full(&phase1_q) && !it.done) {
             long long a, b, c;
             while (!queue_full(&phase1_q) && abc_iter_next(&it, &a, &b, &c)) {
-                gpu_task_t t = { a, b, c };
+                gpu_task_t t;
+                t.a = a; t.b = b; t.c = c;
+                memset(t.sieve_bits, 0, sizeof(t.sieve_bits));
+                sieve_apply(&st, a, b, c, t.sieve_bits);
                 queue_push(&phase1_q, &t);
             }
         }
@@ -561,6 +622,7 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
         time_t now = time(NULL);
         if (last_ckpt_a >= 0 && now - last_checkpoint >= CHECKPOINT_INTERVAL_SEC) {
             checkpoint_save(a_min, a_max, c_min, last_ckpt_a, last_ckpt_b, last_ckpt_c);
+            checkpoint_save_phase2(&phase2_q);
             last_checkpoint = now;
         }
 
@@ -584,6 +646,7 @@ void master_run(long long a_min, long long a_max, long long c_min, int nworkers,
     write_monitor("monitor.txt", workers, n_registered, 0, 0,
                   a_min, a_max, c_min, 1, &hist);
 
+    sieve_table_free(&st);
     free(phase1_q.data);
     free(phase2_q.data);
     fclose(f1);
