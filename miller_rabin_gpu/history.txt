@@ -5,4 +5,4 @@
 
 - Remocao dos cuda_syncronize desnecessarios
 
-1.68ms/
+1.68ms/ 

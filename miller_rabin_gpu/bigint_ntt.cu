@@ -49,7 +49,7 @@ __global__ static void psq_batch(Data64* __restrict__ a, int total, Data64 p)
 
 static constexpr int CARRY_TILE = 512;
 
-// #define CARRY_INTRA_SEQUENTIAL  // descomente para usar versão sequencial (1 thread por tile)
+#define CARRY_INTRA_SEQUENTIAL  // descomente para usar versão sequencial (1 thread por tile)
 
 // Fase 1 — copy + normaliza carries intra-tile.
 __global__ static void carry_intra_copy(
@@ -123,6 +123,20 @@ __global__ static void vadd_batch(
     int j    = blockIdx.x * blockDim.x + threadIdx.x;
     if (cand >= n_batch || j >= n) return;
     d_c[cand * n + j] = d_a[cand * n + j] + d_b[cand * n + j];
+}
+
+// Soma d_buf_A (stride=padded, raw INTT) em d_dst (stride=n_dst) element-wise.
+// Para j >= padded, d_buf_A não tem dados (resultado do produto é 0 ali), não soma.
+__global__ static void vadd_from_raw_batch(
+        Data64* __restrict__       d_dst,
+        const Data64* __restrict__ d_raw,
+        int n_dst, int padded, int n_batch)
+{
+    int cand = blockIdx.y;
+    int j    = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cand >= n_batch || j >= n_dst) return;
+    if (j < padded)
+        d_dst[cand * n_dst + j] += d_raw[cand * padded + j];
 }
 
 // Fase 2 — propaga carries entre tiles sequencialmente (1 thread por candidato).
@@ -272,4 +286,18 @@ void BigIntNTTBatch::add_and_carry(Data64* d_a, const Data64* d_b, int n, int n_
         d_a, d_a, d_tile_carry, n, n, n_batch, n_passes);
     carry_inter_tiles<<<inter_blk, THR, 0, s>>>(
         d_a, d_tile_carry, n, n_batch);
+}
+
+void BigIntNTTBatch::add_raw_buf_and_carry(Data64* d_dst, int n_dst, int n_passes,
+                                            cudaStream_t s)
+{
+    constexpr int THR = 128;
+    int n_tiles   = (n_dst + CARRY_TILE - 1) / CARRY_TILE;
+    int inter_blk = (n_batch + THR - 1) / THR;
+    vadd_from_raw_batch<<<dim3(n_tiles, n_batch), CARRY_TILE, 0, s>>>(
+        d_dst, d_buf_A, n_dst, padded, n_batch);
+    carry_intra_copy<<<dim3(n_tiles, n_batch), CARRY_TILE, 0, s>>>(
+        d_dst, d_dst, d_tile_carry, n_dst, n_dst, n_batch, n_passes);
+    carry_inter_tiles<<<inter_blk, THR, 0, s>>>(
+        d_dst, d_tile_carry, n_dst, n_batch);
 }

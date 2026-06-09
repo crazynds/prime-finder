@@ -74,7 +74,7 @@ __global__ static void shift_right_batch(Data64* __restrict__ dst,
 // Kernel 2 (cs_resolve): 1 thread por candidato, resolve cmp global + borrow_in por tile.
 // Kernel 3 (cs_apply):   aplica subtração tile a tile com borrow_in correto.
 
-static constexpr int CS_TILE = 256;
+static constexpr int CS_TILE = MR_CS_TILE;
 
 // Composição de estados G/P/K para borrow:
 //   state = bw0 | (bw1 << 1)   (bw0 = borrow_out dado borrow_in=0, bw1 dado borrow_in=1)
@@ -272,13 +272,44 @@ static void compute_Nprime(uint64_t* Np_out, const uint64_t* N_lims, int n)
 
 // ── BatchMontCtx ─────────────────────────────────────────────────────────────
 
-BatchMontCtx::BatchMontCtx(const std::vector<uint64_t>& N_all, int n_limbs_, int n_batch_)
+// Helpers para o construtor vector<mpz_t*> — usados na delegação.
+
+static int mpz_compute_n_limbs(const std::vector<mpz_t*>& numbers)
+{
+    int max_digits = 0;
+    for (auto* p : numbers) {
+        int d = (int)mpz_sizeinbase(*p, 10);
+        if (d > max_digits) max_digits = d;
+    }
+    return limbs_for_digits(max_digits + 4);
+}
+
+static std::vector<uint64_t> mpz_build_N_all(const std::vector<mpz_t*>& numbers, int nl)
+{
+    int nb = (int)numbers.size();
+    std::vector<uint64_t> N_all((size_t)nb * nl, 0);
+    for (int i = 0; i < nb; i++)
+        mpz_to_limbs(N_all.data() + i * nl, nl, *numbers[i]);
+    return N_all;
+}
+
+BatchMontCtx::BatchMontCtx(const std::vector<mpz_t*>& numbers, int device_id_)
+    : BatchMontCtx(mpz_build_N_all(numbers, mpz_compute_n_limbs(numbers)),
+                   mpz_compute_n_limbs(numbers),
+                   (int)numbers.size(),
+                   device_id_)
+{}
+
+BatchMontCtx::BatchMontCtx(const std::vector<uint64_t>& N_all, int n_limbs_, int n_batch_,
+                             int device_id_)
     : n_limbs(n_limbs_)
     , n_batch(n_batch_)
+    , device_id(device_id_)
     , padded(next_pow2_ntt(2 * n_limbs_))
     , n_sum(2 * n_limbs_ + 16)
     , ntt(n_limbs_, n_batch_)
 {
+    CU(cudaSetDevice(device_id_));
     const size_t nb  = (size_t)n_batch * n_limbs  * sizeof(Data64);
     const size_t pb  = (size_t)n_batch * padded   * sizeof(Data64);
     const size_t sb  = (size_t)n_batch * n_sum    * sizeof(Data64);
@@ -292,7 +323,6 @@ BatchMontCtx::BatchMontCtx(const std::vector<uint64_t>& N_all, int n_limbs_, int
     CU(cudaMalloc(&d_ntt_Nprime, pb));
     CU(cudaMalloc(&d_T,        sb));
     CU(cudaMalloc(&d_m,        pb));
-    CU(cudaMalloc(&d_mN,       sb));
     CU(cudaMalloc(&d_one_mont, nb));
     CU(cudaMalloc(&d_Nm1_mont, nb));
     CU(cudaMalloc(&d_cs_tile_cmp,    csb));
@@ -346,7 +376,7 @@ BatchMontCtx::~BatchMontCtx()
 {
     cudaFree(d_N);        cudaFree(d_Nprime);
     cudaFree(d_ntt_N);    cudaFree(d_ntt_Nprime);
-    cudaFree(d_T);        cudaFree(d_m);      cudaFree(d_mN);
+    cudaFree(d_T);        cudaFree(d_m);
     cudaFree(d_one_mont); cudaFree(d_Nm1_mont);
     for (int i = 0; i <= PERF_RING; i++)
         if (ev_ring[i]) cudaEventDestroy(ev_ring[i]);
@@ -460,8 +490,7 @@ void BatchMontCtx::reduce_batch(Data64* d_out, cudaStream_t s)
     TSTOP(perf.ntt_inv_ms);
 
     TSTART();
-    ntt.carry_to_limbs(d_mN, n_sum, CARRY_PASSES_MUL, s);
-    ntt.add_and_carry(d_T, d_mN, n_sum, CARRY_PASSES_ADD, s);
+    ntt.add_raw_buf_and_carry(d_T, n_sum, CARRY_PASSES_ADD, s);
     TSTOP(perf.carry_ms);
 
     TSTART();

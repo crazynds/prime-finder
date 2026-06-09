@@ -68,6 +68,10 @@ struct BigIntNTTBatch {
     // d_a += d_b (ambos [n_batch * n]), depois normaliza carries
     void add_and_carry(Data64* d_a, const Data64* d_b, int n, int n_passes,
                        cudaStream_t s = 0);
+    // d_dst += d_buf_A (bruto, stride=padded) e normaliza carries em uma passagem.
+    // Equivale a carry_to_limbs(tmp) + add_and_carry(d_dst, tmp), sem buffer intermediário.
+    void add_raw_buf_and_carry(Data64* d_dst, int n_dst, int n_passes,
+                               cudaStream_t s = 0);
 
     BigIntNTTBatch(const BigIntNTTBatch&) = delete;
     BigIntNTTBatch& operator=(const BigIntNTTBatch&) = delete;

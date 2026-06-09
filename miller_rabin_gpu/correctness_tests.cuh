@@ -1,17 +1,24 @@
 #pragma once
 // correctness_tests.cuh — Testes de corretude usando GMP como referência.
-// Compilado apenas com -DTEST_MODE=ON.
-//
-// Inclua este arquivo em bench_mr_gpu.cu dentro de #ifdef TEST_MODE.
-// select_window_kernel deve estar declarado (ou forward-declarado) antes desta inclusão.
-
-#ifdef TEST_MODE
+// Ativado em runtime via flag --test.
 
 #include <gmp.h>
 #include <vector>
 #include <cstdio>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
+#include <cstring>
+#include <cstdlib>
 #include "montgomery.cuh"
+#include "miller_rabin_runner.cuh"
+
+#ifndef CU
+#define CU(expr) \
+    do { cudaError_t _e=(expr); if(_e!=cudaSuccess) \
+        throw std::runtime_error(std::string("[CUDA] " #expr ": ")+cudaGetErrorString(_e)); \
+    } while(0)
+#endif
 
 // ── Funções auxiliares GMP ────────────────────────────────────────────────────
 
@@ -486,4 +493,243 @@ static void run_correctness_tests(BatchMontCtx& mont,
     printf("\n=== Fim dos testes ===\n\n");
 }
 
-#endif // TEST_MODE
+// ── Testa primos de Mersenne conhecidos ───────────────────────────────────────
+//
+// Usa primos de Mersenne M_p = 2^p - 1 confirmados, todos com > 128 bits.
+// Todos têm s=1 (M_p - 1 = 2*(2^(p-1)-1), com 2^(p-1)-1 ímpar).
+// Espera-se que todos passem em todos os witnesses.
+
+static void run_known_prime_tests()
+{
+    // Expoentes de primos de Mersenne conhecidos com > 128 bits
+    static const int MERSENNE_EXP[] = { 521, 607, 1279 };
+    static const int N_MERSENNE = (int)(sizeof(MERSENNE_EXP) / sizeof(MERSENNE_EXP[0]));
+
+    printf("\n=== Testes com primos de Mersenne conhecidos ===\n");
+    printf("  M_p = 2^p - 1 para p = 521, 607, 1279\n\n");
+
+    // n_limbs baseado no maior (M1279, ~386 dígitos decimais)
+    int max_digits = (int)(MERSENNE_EXP[N_MERSENNE-1] * 0.30103) + 4;
+    int n_limbs = limbs_for_digits(max_digits + 4);
+
+    int nb = N_MERSENNE;
+    std::vector<uint64_t> N_all   ((size_t)nb * n_limbs, 0);
+    std::vector<uint64_t> Nm1_all ((size_t)nb * n_limbs, 0);
+    std::vector<uint64_t> d_all   ((size_t)nb * n_limbs, 0);
+
+    mpz_t M, Mm1, d; mpz_inits(M, Mm1, d, nullptr);
+    for (int i = 0; i < nb; i++) {
+        // M = 2^p - 1
+        mpz_ui_pow_ui(M, 2, (unsigned long)MERSENNE_EXP[i]);
+        mpz_sub_ui(M, M, 1);
+
+        // d = (M-1)/2  (s=1 para todos os Mersenne)
+        mpz_sub_ui(Mm1, M, 1);
+        mpz_tdiv_q_2exp(d, Mm1, 1);
+
+        auto to_lims = [&](uint64_t* out, const mpz_t x) {
+            mpz_t tmp; mpz_init_set(tmp, x);
+            for (int j = 0; j < n_limbs; j++) {
+                out[j] = mpz_get_ui(tmp) & LIMB_MASK;
+                mpz_tdiv_q_2exp(tmp, tmp, LIMB_BITS);
+            }
+            mpz_clear(tmp);
+        };
+
+        to_lims(N_all.data()   + i*n_limbs, M);
+        to_lims(Nm1_all.data() + i*n_limbs, Mm1);
+        to_lims(d_all.data()   + i*n_limbs, d);
+    }
+    mpz_clears(M, Mm1, d, nullptr);
+
+    printf("  n_limbs=%d  NTT padded=%d\n", n_limbs, next_pow2_ntt(2*n_limbs));
+
+    BatchMontCtx mont(N_all, n_limbs, nb);
+    auto alive = gpu_miller_rabin_s1(mont, d_all, Nm1_all, nb, DEFAULT_WITNESSES, "Mersenne");
+
+    printf("\n  Resultados:\n");
+    int ok = 0, fail = 0;
+    for (int i = 0; i < nb; i++) {
+        bool passed = alive[i];
+        printf("  M%-4d (2^%d-1): %s\n",
+               MERSENNE_EXP[i], MERSENNE_EXP[i], passed ? "PRIMO OK" : "FALHOU (bug!)");
+        if (passed) ok++; else fail++;
+    }
+
+    if (fail == 0)
+        printf("\n  Todos os %d primos de Mersenne identificados corretamente.\n", ok);
+    else
+        printf("\n  ERRO: %d primo(s) nao identificado(s) — bug no algoritmo!\n", fail);
+
+    printf("=== Fim dos testes com Mersenne ===\n\n");
+}
+
+// ── Testa primos conhecidos com s != 1 ────────────────────────────────────────
+//
+// Gera primos deterministicamente via GMP a partir de pontos fixos, buscando
+// primos com s=2, s=3, e s>=4 (cada um > 512 bits / ~155 dígitos decimais).
+// Verifica que run_witnesses_general os identifica corretamente como primos.
+
+static void run_general_s_prime_tests()
+{
+    printf("\n=== Testes com primos de s != 1 ===\n");
+    printf("  Gerando primos com s=2, s=3, s>=4 via GMP (> 512 bits)...\n\n");
+
+    // Ponto de partida fixo acima de 2^512 para cada busca
+    // Cada valor é ajustado para garantir residuos mod 8 que favorecem o s alvo,
+    // acelerando a busca (mas s é verificado rigorosamente após encontrar o primo).
+    //
+    //   p ≡ 5 mod 8  →  p-1 ≡ 4 mod 8  →  s=2 exato
+    //   p ≡ 9 mod 16 →  p-1 ≡ 8 mod 16 →  s=3 exato
+    //   p ≡ 1 mod 16 →  p-1 ≡ 0 mod 16 →  s>=4
+    struct Target {
+        unsigned long start_offset;  // 2^512 + start_offset
+        int want_s_min, want_s_max;
+        const char* desc;
+    };
+    static const Target TARGETS[] = {
+        { 4UL,  2, 2, "s=2"  },   // 2^512+4 ≡ 4 mod 8, próximo primo impar perto
+        { 7UL,  3, 3, "s=3"  },   // partida próxima de 9 mod 16
+        { 15UL, 4, 99, "s>=4" },  // partida próxima de 1 mod 16
+    };
+    static const int N_TARGETS = (int)(sizeof(TARGETS) / sizeof(TARGETS[0]));
+
+    int n_limbs = limbs_for_digits(160 + 4);  // ~155 dígitos (> 512 bits)
+
+    printf("  n_limbs=%d  NTT padded=%d\n\n", n_limbs, next_pow2_ntt(2*n_limbs));
+
+    mpz_t base, p, Nm1, d_tmp;
+    mpz_inits(base, p, Nm1, d_tmp, nullptr);
+    mpz_ui_pow_ui(base, 2, 512);
+
+    int total_ok = 0, total_fail = 0;
+
+    for (int ti = 0; ti < N_TARGETS; ti++) {
+        const Target& tgt = TARGETS[ti];
+
+        // Encontra o próximo primo a partir do ponto fixo com s no intervalo desejado
+        mpz_add_ui(p, base, tgt.start_offset);
+        if (mpz_even_p(p)) mpz_add_ui(p, p, 1);
+
+        int found_s = -1;
+        int attempts = 0;
+        while (found_s < tgt.want_s_min || found_s > tgt.want_s_max) {
+            mpz_nextprime(p, p);
+            mpz_sub_ui(Nm1, p, 1);
+            mpz_set(d_tmp, Nm1);
+            found_s = 0;
+            while (mpz_even_p(d_tmp)) { mpz_tdiv_q_2exp(d_tmp, d_tmp, 1); found_s++; }
+            attempts++;
+            if (attempts > 2000) { found_s = -1; break; }
+        }
+
+        if (found_s == -1) {
+            printf("  [%s] SKIP — nao encontrado em 2000 tentativas\n", tgt.desc);
+            continue;
+        }
+
+        // Verifica via GMP que p é de fato primo
+        if (!mpz_probab_prime_p(p, 25)) {
+            printf("  [%s] ERRO interno: numero encontrado nao eh primo segundo GMP!\n", tgt.desc);
+            total_fail++;
+            continue;
+        }
+
+        // Imprime informação do primo encontrado
+        char* p_str = mpz_get_str(nullptr, 10, p);
+        int p_digits = (int)strlen(p_str);
+        free(p_str);
+        printf("  [%s] primo com %d dígitos encontrado em %d tentativas (s=%d)\n",
+               tgt.desc, p_digits, attempts, found_s);
+
+        // Constrói NumberCandidate e executa o teste
+        NumberCandidate cand;
+        cand.build_from_mpz(p, n_limbs);
+
+        BatchMontCtx mont(cand.N_lims, n_limbs, 1);
+        auto alive = gpu_miller_rabin(mont, cand.d_lims, cand.Nm1_lims,
+                                     cand.s, 1, DEFAULT_WITNESSES, tgt.desc);
+
+        bool passed = alive[0];
+        printf("  [%s] resultado: %s\n\n", tgt.desc, passed ? "PRIMO OK" : "FALHOU (bug!)");
+        if (passed) total_ok++; else total_fail++;
+    }
+
+    mpz_clears(base, p, Nm1, d_tmp, nullptr);
+
+    if (total_fail == 0)
+        printf("  Todos os %d primos (s!=1) identificados corretamente.\n", total_ok);
+    else
+        printf("  ERRO: %d primo(s) nao identificado(s) — bug no algoritmo!\n", total_fail);
+
+    printf("=== Fim dos testes com s!=1 ===\n\n");
+}
+
+// ── Testa primos com s=1 gerados via mpz_nextprime ────────────────────────────
+//
+// Busca primos p ≡ 3 (mod 4) acima de 2^512, que garantem s=1 (p-1 = 2*d,
+// d ímpar). Verifica via mpz_probab_prime_p e depois via gpu_miller_rabin.
+
+static void run_s1_nextprime_tests()
+{
+    printf("\n=== Testes com primos s=1 (mpz_nextprime, > 512 bits) ===\n");
+
+    // p ≡ 3 mod 4 → p-1 ≡ 2 mod 4 → s=1 exato
+    // Partimos de 2^512 + 3 e avançamos até encontrar 3 primos com s=1.
+    static const int N_WANT = 3;
+    int n_limbs = limbs_for_digits(160 + 4);
+
+    printf("  n_limbs=%d  NTT padded=%d\n\n", n_limbs, next_pow2_ntt(2*n_limbs));
+
+    mpz_t base, p, Nm1, d_tmp;
+    mpz_inits(base, p, Nm1, d_tmp, nullptr);
+    mpz_ui_pow_ui(base, 2, 512);
+    mpz_add_ui(p, base, 3);  // começa em 2^512+3
+
+    int total_ok = 0, total_fail = 0, found = 0;
+
+    while (found < N_WANT) {
+        mpz_nextprime(p, p);
+
+        // Verifica s=1
+        mpz_sub_ui(Nm1, p, 1);
+        mpz_set(d_tmp, Nm1);
+        int s = 0;
+        while (mpz_even_p(d_tmp)) { mpz_tdiv_q_2exp(d_tmp, d_tmp, 1); s++; }
+        if (s != 1) continue;
+
+        found++;
+
+        // Confirmação independente via GMP
+        if (!mpz_probab_prime_p(p, 25)) {
+            printf("  [s=1 #%d] ERRO interno: numero nao eh primo segundo GMP!\n", found);
+            total_fail++;
+            continue;
+        }
+
+        char* p_str = mpz_get_str(nullptr, 10, p);
+        int p_digits = (int)strlen(p_str);
+        free(p_str);
+        printf("  [s=1 #%d] primo com %d dígitos (s=1)\n", found, p_digits);
+
+        NumberCandidate cand;
+        cand.build_from_mpz(p, n_limbs);
+
+        BatchMontCtx mont(cand.N_lims, n_limbs, 1);
+        auto alive = gpu_miller_rabin(mont, cand.d_lims, cand.Nm1_lims,
+                                     cand.s, 1, DEFAULT_WITNESSES, "s=1");
+
+        bool passed = alive[0];
+        printf("  [s=1 #%d] resultado: %s\n\n", found, passed ? "PRIMO OK" : "FALHOU (bug!)");
+        if (passed) total_ok++; else total_fail++;
+    }
+
+    mpz_clears(base, p, Nm1, d_tmp, nullptr);
+
+    if (total_fail == 0)
+        printf("  Todos os %d primos s=1 identificados corretamente.\n", total_ok);
+    else
+        printf("  ERRO: %d primo(s) nao identificado(s) — bug no algoritmo!\n", total_fail);
+
+    printf("=== Fim dos testes s=1 ===\n\n");
+}

@@ -19,7 +19,8 @@ endif()
 project(PrimeHunter LANGUAGES C CXX CUDA)
 
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_ARCHITECTURES native)
 
 # ----- Dependencies -----
@@ -105,3 +106,47 @@ set_target_properties(prime_tests PROPERTIES
 
 add_test(NAME unit_tests COMMAND prime_tests --test)
 add_test(NAME gpu_tests  COMMAND prime_tests --test)
+
+# ── Miller-Rabin GPU (bench_mr_gpu) ───────────────────────────────────────────
+
+include(FetchContent)
+FetchContent_Declare(
+    GPUNTT
+    GIT_REPOSITORY https://github.com/Alisah-Ozcan/GPU-NTT.git
+    GIT_TAG        main
+)
+set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/gpuntt_install" CACHE PATH "" FORCE)
+FetchContent_MakeAvailable(GPUNTT)
+
+if(NOT TARGET GPUNTT::ntt)
+    find_package(GPUNTT REQUIRED
+        PATHS "${CMAKE_BINARY_DIR}/gpuntt_install/lib/cmake/GPUNTT-1.0"
+        NO_DEFAULT_PATH)
+endif()
+
+add_executable(bench_mr_gpu
+    miller_rabin_gpu/bench_mr_gpu.cu
+    miller_rabin_gpu/miller_rabin_runner.cu
+    miller_rabin_gpu/bigint_ntt.cu
+    miller_rabin_gpu/montgomery.cu
+)
+
+target_include_directories(bench_mr_gpu PRIVATE
+    ${GMP_INCLUDE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/miller_rabin_gpu
+)
+
+target_link_libraries(bench_mr_gpu PRIVATE
+    GPUNTT::ntt
+    CUDA::cudart
+    ${GMP_LIB}
+)
+
+target_compile_options(bench_mr_gpu PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--generate-code=arch=compute_89,code=sm_89>
+)
+
+set_target_properties(bench_mr_gpu PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+)

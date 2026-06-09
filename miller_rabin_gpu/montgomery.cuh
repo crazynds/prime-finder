@@ -5,8 +5,10 @@
 // NTT chamada uma unica vez com batch=n_batch.
 
 #include "bigint_ntt.cuh"
+#include "config.cuh"
 #include <vector>
 #include <gmp.h>
+#include <cuda_runtime.h>
 
 struct BatchMontCtx {
     int n_limbs, n_batch, padded, n_sum;
@@ -28,7 +30,6 @@ struct BatchMontCtx {
     // Buffers de trabalho
     Data64* d_T  = nullptr;   // [n_batch * n_sum]
     Data64* d_m  = nullptr;   // [n_batch * padded]  (NTT workspace de m)
-    Data64* d_mN = nullptr;   // [n_batch * n_sum]
 
     // Buffers para cond_sub tileado [n_batch * n_cs_tiles]
     int n_cs_tiles = 0;
@@ -61,13 +62,22 @@ struct BatchMontCtx {
     //
     // Tamanho: mont_mul_batch gera no máximo 11 seções TSTART/TSTOP (reduce_batch
     // tem 7 + 4 extras), então 12 eventos são suficientes para cobrir um call.
-    static constexpr int PERF_RING = 12;
-    cudaEvent_t ev_ring[PERF_RING + 1] = {};   // PERF_RING seções → PERF_RING+1 marcos
-    float*      acc_ring[PERF_RING]    = {};   // ponteiro para o acumulador de cada seção
+    static constexpr int PERF_RING = MR_PERF_RING;
+    cudaEvent_t ev_ring[MR_PERF_RING + 1] = {};   // PERF_RING seções → PERF_RING+1 marcos
+    float*      acc_ring[MR_PERF_RING]    = {};   // ponteiro para o acumulador de cada seção
     int         ring_cur               = 0;    // número de seções abertas
 
-    // N_all: vetor flat [n_batch * n_limbs], little-endian 16-bit limbs
-    explicit BatchMontCtx(const std::vector<uint64_t>& N_all, int n_limbs_, int n_batch_);
+    int device_id = 0;  // GPU utilizada
+
+    // Construtor a partir de limbs pré-computados.
+    // device_id: índice da GPU (0 por padrão; use cudaGetDeviceCount para listar).
+    // N_all: vetor flat [n_batch * n_limbs], little-endian 16-bit limbs.
+    explicit BatchMontCtx(const std::vector<uint64_t>& N_all, int n_limbs_, int n_batch_,
+                          int device_id_ = 0);
+
+    // Construtor de conveniência: aceita os números diretamente como mpz_t.
+    // Calcula n_limbs automaticamente a partir do maior número do vetor.
+    explicit BatchMontCtx(const std::vector<mpz_t*>& numbers, int device_id_ = 0);
     ~BatchMontCtx();
 
     // x_all (host, n_batch * n_limbs) -> forma Montgomery (host)
