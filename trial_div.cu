@@ -144,9 +144,18 @@ extern "C" int cuda_set_device(int index)
     return (cudaSetDevice(index) == cudaSuccess) ? 0 : -1;
 }
 
+/* Helper: elapsed milliseconds between two CUDA events → seconds */
+static double cuda_event_secs(cudaEvent_t start, cudaEvent_t stop)
+{
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, start, stop);
+    return (double)ms * 1e-3;
+}
+
 extern "C" int trial_div_gpu(const prime_list_t *pl,
                               long long a, long long b, long long c,
-                              uint32_t *sieve_bits)
+                              uint32_t *sieve_bits,
+                              gpu_timing_t *timing)
 {
     static int tables_loaded = 0;
     if (!tables_loaded) {
@@ -157,18 +166,29 @@ extern "C" int trial_div_gpu(const prime_list_t *pl,
         tables_loaded = 1;
     }
 
+    if (timing) *timing = {0.0, 0.0, 0.0};
+
+    cudaEvent_t e0, e1, e2, e3;
+    cudaEventCreate(&e0); cudaEventCreate(&e1);
+    cudaEventCreate(&e2); cudaEventCreate(&e3);
+
     uint32_t *d_primes = NULL, *d_bits = NULL;
     int rc = 0;
     size_t pb = (size_t)pl->count * sizeof(uint32_t);
     size_t bb = KJ_WORDS * sizeof(uint32_t);
 
     if (cudaMalloc(&d_primes, pb) != cudaSuccess) { rc = -1; goto done; }
+    if (cudaMalloc(&d_bits,   bb) != cudaSuccess) { rc = -1; goto done; }
+
+    /* --- upload --- */
+    cudaEventRecord(e0);
     if (cudaMemcpy(d_primes, pl->primes, pb, cudaMemcpyHostToDevice) != cudaSuccess)
         { rc = -1; goto done; }
-    if (cudaMalloc(&d_bits, bb) != cudaSuccess) { rc = -1; goto done; }
     if (cudaMemcpy(d_bits, sieve_bits, bb, cudaMemcpyHostToDevice) != cudaSuccess)
         { rc = -1; goto done; }
+    cudaEventRecord(e1);
 
+    /* --- kernel --- */
     {
 #ifndef TRIAL_DIV_BLOCK_SIZE
 #define TRIAL_DIV_BLOCK_SIZE 256
@@ -180,11 +200,23 @@ extern "C" int trial_div_gpu(const prime_list_t *pl,
             (uint64_t)a, (uint64_t)b, (uint64_t)c, d_bits);
         if (cudaDeviceSynchronize() != cudaSuccess) { rc = -1; goto done; }
     }
+    cudaEventRecord(e2);
 
+    /* --- download --- */
     if (cudaMemcpy(sieve_bits, d_bits, bb, cudaMemcpyDeviceToHost) != cudaSuccess)
         { rc = -1; goto done; }
+    cudaEventRecord(e3);
+    cudaEventSynchronize(e3);
+
+    if (timing) {
+        timing->upload   = cuda_event_secs(e0, e1);
+        timing->kernel   = cuda_event_secs(e1, e2);
+        timing->download = cuda_event_secs(e2, e3);
+    }
 
 done:
+    cudaEventDestroy(e0); cudaEventDestroy(e1);
+    cudaEventDestroy(e2); cudaEventDestroy(e3);
     if (d_primes) cudaFree(d_primes);
     if (d_bits)   cudaFree(d_bits);
     if (rc != 0) fprintf(stderr, "trial_div_gpu: CUDA error\n");

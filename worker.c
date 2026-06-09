@@ -32,9 +32,10 @@ static void do_gpu_task(const prime_list_t *gpu_primes,
     uint32_t bits[KJ_WORDS];
     memcpy(bits, task->sieve_bits, sizeof(bits));
 
+    gpu_timing_t gtiming = {0};
     if (!sieve_all_eliminated(bits)) {
         if (use_gpu) {
-            if (trial_div_gpu(gpu_primes, task->a, task->b, task->c, bits) != 0)
+            if (trial_div_gpu(gpu_primes, task->a, task->b, task->c, bits, &gtiming) != 0)
                 fprintf(stderr, "[rank %d] GPU trial division failed\n", world_rank);
         } else {
             trial_div_cpu(cpu_p1_primes, task->a, task->b, task->c, bits);
@@ -57,6 +58,13 @@ static void do_gpu_task(const prime_list_t *gpu_primes,
     fprintf(stderr, "[rank %d] End Phase 1 - %s a=%lld b=%lld c=%lld survivors=%d time=%.3fs\n",
             world_rank, use_gpu ? "GPU" : "CPU",
             task->a, task->b, task->c, result->n_survivors, elapsed1);
+    if (use_gpu && (gtiming.upload + gtiming.kernel + gtiming.download) > 0.0) {
+        fprintf(stderr,
+                "  ├─ upload  (H→D): %8.3fs\n"
+                "  ├─ kernel       : %8.3fs\n"
+                "  └─ download(D→H): %8.3fs\n",
+                gtiming.upload, gtiming.kernel, gtiming.download);
+    }
 }
 
 static void do_cpu_task(const cpu_task_t *task, cpu_result_t *result)
@@ -66,7 +74,33 @@ static void do_cpu_task(const cpu_task_t *task, cpu_result_t *result)
     result->c = task->c;
     result->k = task->k;
     result->j = task->j;
-    result->result = (uint8_t)miller_rabin_test(task->a, task->b, task->c, task->k, task->j);
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    fprintf(stderr, "[rank %d] Phase 2 - Starting CPU task a=%lld b=%lld c=%lld k=%d j=%d\n",
+            world_rank, task->a, task->b, task->c, task->k, task->j);
+
+    mr_timing_t mrt = {0};
+    result->result = (uint8_t)miller_rabin_test(task->a, task->b, task->c, task->k, task->j, &mrt);
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+    fprintf(stderr, "[rank %d] End Phase 2 - CPU a=%lld b=%lld c=%lld k=%d j=%d result=%d time=%.3fs\n",
+            world_rank, task->a, task->b, task->c, task->k, task->j, result->result, elapsed);
+    if (result->result == 0) {
+        fprintf(stderr,
+                "  ├─ build N      : %8.6fs\n"
+                "  └─ Miller-Rabin N: %7.3fs  → composite\n",
+                mrt.build_n, mrt.mr_n);
+    } else {
+        fprintf(stderr,
+                "  ├─ build N      : %8.6fs\n"
+                "  ├─ Miller-Rabin N: %7.3fs  → probable prime\n"
+                "  ├─ build rev(N) : %8.6fs\n"
+                "  └─ Miller-Rabin R: %7.3fs  → %s\n",
+                mrt.build_n, mrt.mr_n, mrt.build_revn, mrt.mr_revn,
+                (result->result == 2) ? "probable prime ★" : "composite");
+    }
 }
 
 void worker_run(const prime_list_t *gpu_primes,

@@ -1,5 +1,13 @@
 #include "miller_rabin.h"
 #include <gmp.h>
+#include <time.h>
+
+static double mono_secs(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec * 1e-9;
+}
 
 /* Number of decimal digits of x (x >= 1) */
 static int ndigits(int x)
@@ -65,24 +73,43 @@ static void build_revN(mpz_t out, mpz_t tmp,
     mpz_sub_ui(out, out, 1);
 }
 
-int miller_rabin_test(long long a, long long b, long long c, int k, int j)
+int miller_rabin_test(long long a, long long b, long long c, int k, int j,
+                      mr_timing_t *timing)
 {
+    if (timing) *timing = (mr_timing_t){0.0, 0.0, 0.0, 0.0};
+
     mpz_t N, tmp;
     mpz_init(N);
     mpz_init(tmp);
 
+    double t0, t1, t2, t3, t4;
+
+    t0 = mono_secs();
     build_N(N, tmp, a, b, c, k, j);
+    t1 = mono_secs();
 
     int r_N = mpz_probab_prime_p(N, 5);
+    t2 = mono_secs();
+
     if (r_N == 0) {
+        if (timing) { timing->build_n = t1-t0; timing->mr_n = t2-t1; }
         mpz_clear(N); mpz_clear(tmp);
         return 0;
     }
 
     /* N is probable prime — test rev(N) */
     build_revN(N, tmp, a, b, c, k, j);  /* reuse N to save memory */
+    t3 = mono_secs();
 
     int r_R = mpz_probab_prime_p(N, 5);
+    t4 = mono_secs();
+
+    if (timing) {
+        timing->build_n    = t1 - t0;
+        timing->mr_n       = t2 - t1;
+        timing->build_revn = t3 - t2;
+        timing->mr_revn    = t4 - t3;
+    }
 
     mpz_clear(N); mpz_clear(tmp);
 

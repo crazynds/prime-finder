@@ -105,7 +105,9 @@ typedef struct {
 
 typedef struct {
     long long a, b, c;
-    int n_pairs, n_pp, n_both;
+    int k, j;
+    int n_prime;    /* N is probable/definite prime */
+    int revn_prime; /* rev(N) is probable prime */
 } p2_hist_t;
 
 typedef struct {
@@ -129,8 +131,9 @@ static void hist_push_p1(history_t *h, long long a, long long b, long long c, in
     if (h->p1_count < HISTORY_SIZE) h->p1_count++;
     h->total_p1++;
 }
-static void hist_push_p2(history_t *h, long long a, long long b, long long c, int pairs, int pp, int both) {
-    h->p2[h->p2_head] = (p2_hist_t){a, b, c, pairs, pp, both};
+static void hist_push_p2(history_t *h, long long a, long long b, long long c,
+                          int k, int j, int n_prime, int revn_prime) {
+    h->p2[h->p2_head] = (p2_hist_t){a, b, c, k, j, n_prime, revn_prime};
     h->p2_head = (h->p2_head + 1) % HISTORY_SIZE;
     if (h->p2_count < HISTORY_SIZE) h->p2_count++;
     h->total_p2++;
@@ -225,7 +228,7 @@ static void write_monitor(const char *path,
 
     /* ---- three-column history ---- */
 #define C1W 44
-#define C2W 54
+#define C2W 62
 #define C3W 40
 
     fprintf(f, "%-*s  %-*s  %-*s\n",
@@ -234,7 +237,7 @@ static void write_monitor(const char *path,
             C3W, "--- Candidates found ---");
     fprintf(f, "%-*s  %-*s  %-*s\n",
             C1W, "a  b  c  survivors",
-            C2W, "a  b  c  pairs  pp  both",
+            C2W, "a  b  c  k  j  N  revN",
             C3W, "a  b  c  k  j");
 
     int rows = HISTORY_SIZE;
@@ -253,8 +256,11 @@ static void write_monitor(const char *path,
         int i2 = (hist->p2_head - 1 - r + HISTORY_SIZE) % HISTORY_SIZE;
         if (r < hist->p2_count) {
             const p2_hist_t *e = &hist->p2[i2];
-            snprintf(c2, sizeof(c2), "a=%-6lld b=%-6lld c=%-6lld p=%-5d pp=%-4d b=%-3d",
-                     e->a, e->b, e->c, e->n_pairs, e->n_pp, e->n_both);
+            snprintf(c2, sizeof(c2),
+                     "a=%-6lld b=%-6lld c=%-6lld k=%-3d j=%-3d N=%-5s revN=%-5s",
+                     e->a, e->b, e->c, e->k, e->j,
+                     e->n_prime    ? "true" : "false",
+                     e->revn_prime ? "true" : "false");
         }
 
         int i3 = (hist->found_head - 1 - r + HISTORY_SIZE) % HISTORY_SIZE;
@@ -538,9 +544,11 @@ void master_run(const char *small_primes_path,
                 worker_info_t *w = find_worker(workers, n_registered, src);
                 if (w) w->task_type = TASK_IDLE;
 
-                if (res->result >= 1) {
-                    int both = (res->result == 2) ? 1 : 0;
-                    hist_push_p2(&hist, res->a, res->b, res->c, 1, 1, both);
+                {
+                    int n_prime    = (res->result >= 1) ? 1 : 0;
+                    int revn_prime = (res->result == 2) ? 1 : 0;
+                    hist_push_p2(&hist, res->a, res->b, res->c,
+                                 res->k, res->j, n_prime, revn_prime);
                 }
 
                 if (res->result == 2) {

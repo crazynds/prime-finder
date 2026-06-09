@@ -1,0 +1,8 @@
+- Otimizacao do carry propagation:
+ Fazer o carry em paralelo e repetir enquanto houver carry
+
+1.71 ms/iter
+
+- Remocao dos cuda_syncronize desnecessarios
+
+1.68ms/

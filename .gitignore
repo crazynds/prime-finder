@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build_test/
 
 # Generated prime files (large, regenerate with gen_primes)
 *.bin

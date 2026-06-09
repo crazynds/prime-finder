@@ -14,7 +14,7 @@ static int test_known_composites(void)
     /* N = 10^a - k*10^b - j*10^c - 1 */
     /* a=5,b=2,c=1,k=1,j=1: N = 100000 - 100 - 10 - 1 = 99889 = 11 * 9081 - check */
     /* Just verify it returns a valid value */
-    int r = miller_rabin_test(5, 2, 1, 1, 1);
+    int r = miller_rabin_test(5, 2, 1, 1, 1, NULL);
     ASSERT(r == 0 || r == 1 || r == 2 || r == 3);
 
     /* a=4,b=2,c=1,k=3,j=5: N = 10000 - 300 - 50 - 1 = 9649 = 7*1378+... check composite */
@@ -24,7 +24,7 @@ static int test_known_composites(void)
      * 9649 / 53 = 182.1... 9649 / 59 = 163.5... 9649 / 61 = 158.2... 9649 / 67 = 144.0
      * 9649 / 67 = 144.01... 9649 = 67 * 144 + 1 = 9648+1 = 9649. Nope.
      * sqrt(9649) ~ 98.2, need to check up to 98. Just use MR and trust it. */
-    r = miller_rabin_test(4, 2, 1, 3, 5);
+    r = miller_rabin_test(4, 2, 1, 3, 5, NULL);
     ASSERT(r == 0 || r == 1 || r == 2 || r == 3);
 
     return 0;
@@ -36,7 +36,7 @@ static int test_known_prime(void)
      * We search a=6,b=3,c=2 for any (k,j) in [1,10] and verify consistency. */
     for (int k = 1; k <= 10; k++) {
         for (int j = 1; j <= 10; j++) {
-            int r = miller_rabin_test(6, 3, 2, k, j);
+            int r = miller_rabin_test(6, 3, 2, k, j, NULL);
             ASSERT(r == 0 || r == 1 || r == 2 || r == 3);  /* just check valid return */
         }
     }
@@ -58,7 +58,7 @@ static int test_mr_vs_trial_div_small(void)
                 if (N % d == 0) { is_prime_td = 0; break; }
             }
 
-            int r = miller_rabin_test(4, 2, 1, k, j);
+            int r = miller_rabin_test(4, 2, 1, k, j, NULL);
             /* r==0: N composite; r>=1: N probable prime (r==2 means both N and rev(N)) */
             int mr_says_N_prime = (r >= 1);
             if (mr_says_N_prime != is_prime_td) {

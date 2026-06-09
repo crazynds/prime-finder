@@ -80,7 +80,7 @@ static int test_gpu_vs_cpu(const prime_list_t *pl, long long a, long long b, lon
 
     cpu_brute_sieve(pl, a, b, c, cpu_bits);
 
-    if (trial_div_gpu(pl, a, b, c, gpu_bits) != 0)
+    if (trial_div_gpu(pl, a, b, c, gpu_bits, NULL) != 0)
         FAIL("trial_div_gpu returned error");
 
     /* 1. GPU must mark at least everything CPU marks (no false negatives) */
@@ -147,8 +147,8 @@ static int test_gpu_consistency(const prime_list_t *pl, long long a, long long b
     memset(bits1, 0, sizeof(bits1));
     memset(bits2, 0, sizeof(bits2));
 
-    ASSERT(trial_div_gpu(pl, a, b, c, bits1) == 0);
-    ASSERT(trial_div_gpu(pl, a, b, c, bits2) == 0);
+    ASSERT(trial_div_gpu(pl, a, b, c, bits1, NULL) == 0);
+    ASSERT(trial_div_gpu(pl, a, b, c, bits2, NULL) == 0);
 
     for (int w = 0; w < KJ_WORDS; w++)
         ASSERT(bits1[w] == bits2[w]);

@@ -35,7 +35,7 @@ int bench_miller_rabin_run(void)
         int k = BENCH_KS[i], j = BENCH_JS[i];
 
         double t0 = now_sec();
-        int r = miller_rabin_test(a, b, c, k, j);
+        int r = miller_rabin_test(a, b, c, k, j, NULL);
         double elapsed = now_sec() - t0;
         t_total += elapsed;
         if (elapsed > t_worst) t_worst = elapsed;
