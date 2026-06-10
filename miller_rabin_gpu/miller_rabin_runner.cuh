@@ -7,6 +7,7 @@
 #include "montgomery.cuh"
 #include "config.cuh"
 #include <vector>
+#define MR_WINDOW_SIZE (1 << MR_WINDOW_BITS)
 
 static constexpr int WINDOW_BITS = MR_WINDOW_BITS;
 static constexpr int WINDOW_SIZE = MR_WINDOW_SIZE;

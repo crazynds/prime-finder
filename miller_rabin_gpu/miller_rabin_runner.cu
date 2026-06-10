@@ -145,7 +145,7 @@ static void window_exp_loop(
             }
     }
 
-    const int thr = MR_BLOCK_THREADS;
+    const int thr = MR_THR_SELECT_WIN;
     dim3 grid_sel((unsigned)(n + thr-1)/thr, (unsigned)n_total);
 
     auto t_start      = hrc::now();
@@ -436,7 +436,7 @@ std::vector<bool> gpu_miller_rabin(
             std::swap(buf.d_r, buf.d_scratch);
 
             // Marca 2 quem ainda é vivo (alive==1) e r == N-1
-            check_equals_kernel<<<n_total, MR_BLOCK_THREADS>>>(buf.d_r, mont.d_Nm1_mont, d_alive, n, n_total);
+            check_equals_kernel<<<n_total, MR_THR_CHECK>>>(buf.d_r, mont.d_Nm1_mont, d_alive, n, n_total);
         }
 
         CU(cudaMemcpy(alive_h.data(), d_alive, n_total, cudaMemcpyDeviceToHost));

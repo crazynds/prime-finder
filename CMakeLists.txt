@@ -126,6 +126,7 @@ endif()
 
 add_executable(bench_mr_gpu
     miller_rabin_gpu/bench_mr_gpu.cu
+    miller_rabin_gpu/bench_ops.cu
     miller_rabin_gpu/miller_rabin_runner.cu
     miller_rabin_gpu/bigint_ntt.cu
     miller_rabin_gpu/montgomery.cu
@@ -150,3 +151,4 @@ set_target_properties(bench_mr_gpu PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE ON
 )
+

@@ -4,6 +4,7 @@
 // Layout: todos os arrays [n_batch * stride], batch_i = candidato.
 // NTT chamada uma unica vez com batch=n_batch.
 
+#include "config.cuh"
 #include "bigint_ntt.cuh"
 #include "config.cuh"
 #include <vector>
@@ -37,35 +38,64 @@ struct BatchMontCtx {
     int* d_cs_tile_bstate = nullptr;  // estado G/P/K de borrow por tile
     int* d_cs_tile_bin    = nullptr;  // borrow_in resolvido por tile
 
-    // Acumuladores de tempo para profiling (ms, via CUDA events)
+    // Acumuladores de tempo por seção de kernel (ms, via CUDA events).
+    // Cada campo corresponde a exatamente um par TSTART/TSTOP.
     struct PerfInner {
-        float ntt_fwd_ms  = 0;  // NTT forward (ntt_A, ntt_B)
-        float ntt_inv_ms  = 0;  // NTT inverse (psq, pmul, pmul_ext + INTT)
-        float carry_ms    = 0;  // carry_to_limbs + add_and_carry
-        float cond_sub_ms = 0;  // cond_sub_batch (3 kernels)
-        float other_ms    = 0;  // extract_low, shift_right, etc.
+        // mul: load_padded(A)+NTT(A) + load_padded(B)+NTT(B)  |  sq: load_padded(A)+NTT(A)
+        float ntt_input_ms     = 0;
+        // mul: pmul_batch + INTT  |  sq: psq_batch + INTT
+        float ntt_product_ms   = 0;
+        // carry_intra + carry_inter sobre T (resultado do produto/quadrado)
+        float carry_product_ms = 0;
+        // reduce: extract_low(T) + fwd_A — prepara T_low para multiplicar por N'
+        float red_ntt_tlow_ms  = 0;
+        // reduce: pmul_ext(N') + INTT — m = T_low * N' no domínio NTT
+        float red_pmul_np_ms   = 0;
+        // reduce: carry_intra + carry_inter sobre m
+        float red_carry_m_ms   = 0;
+        // reduce: load_padded(m) + NTT(m) — transforma m para multiplicar por N
+        float red_ntt_m_ms     = 0;
+        // reduce: pmul_ext(N) + INTT — mN = m * N no domínio NTT
+        float red_pmul_n_ms    = 0;
+        // reduce: vadd_from_raw + carry_intra + carry_inter — T += mN, normaliza
+        float red_add_carry_ms = 0;
+        // reduce: shift_right(T, n_limbs) — resultado final = T[n_limbs..]
+        float red_shift_ms     = 0;
+        // cs_phase1 + cs_resolve + cs_apply — subtração condicional mod N
+        float cond_sub_ms      = 0;
+
         void print() const {
-            float total = ntt_fwd_ms + ntt_inv_ms + carry_ms + cond_sub_ms + other_ms;
+            float total = ntt_input_ms + ntt_product_ms + carry_product_ms
+                        + red_ntt_tlow_ms + red_pmul_np_ms + red_carry_m_ms
+                        + red_ntt_m_ms + red_pmul_n_ms + red_add_carry_ms
+                        + red_shift_ms + cond_sub_ms;
             auto pct = [&](float v) { return total > 0 ? v * 100.0f / total : 0.0f; };
-            printf("  ├─ %-18s %8.2fs  %5.1f%%\n", "ntt_forward",  ntt_fwd_ms /1000.0f, pct(ntt_fwd_ms));
-            printf("  ├─ %-18s %8.2fs  %5.1f%%\n", "ntt_inverse",  ntt_inv_ms /1000.0f, pct(ntt_inv_ms));
-            printf("  ├─ %-18s %8.2fs  %5.1f%%\n", "carry_norm",   carry_ms   /1000.0f, pct(carry_ms));
-            printf("  ├─ %-18s %8.2fs  %5.1f%%\n", "cond_sub",     cond_sub_ms/1000.0f, pct(cond_sub_ms));
-            printf("  ├─ %-18s %8.2fs  %5.1f%%\n", "other",        other_ms   /1000.0f, pct(other_ms));
-            printf("  └─ %-18s %8.2fs\n",           "TOTAL interno",total      /1000.0f);
+            auto row = [&](const char* name, float ms) {
+                printf("  ├─ %-22s %8.3fs  %5.1f%%\n", name, ms/1000.0f, pct(ms));
+            };
+            row("ntt_input",        ntt_input_ms);
+            row("ntt_product",      ntt_product_ms);
+            row("carry_product",    carry_product_ms);
+            row("red:ntt_Tlow",     red_ntt_tlow_ms);
+            row("red:pmul_Np+INTT", red_pmul_np_ms);
+            row("red:carry_m",      red_carry_m_ms);
+            row("red:ntt_m",        red_ntt_m_ms);
+            row("red:pmul_N+INTT",  red_pmul_n_ms);
+            row("red:add_carry",    red_add_carry_ms);
+            row("red:shift_right",  red_shift_ms);
+            row("cond_sub",         cond_sub_ms);
+            printf("  └─ %-22s %8.3fs\n", "TOTAL", total/1000.0f);
         }
     } perf;
 
     // Ring de eventos para profiling sem sync no hot path.
     // TSTART/TSTOP gravam eventos sem bloquear; perf_flush() sincroniza UMA vez
     // no final de cada mont_mul_batch/mont_sq_batch e acumula todos os tempos.
-    //
-    // Tamanho: mont_mul_batch gera no máximo 11 seções TSTART/TSTOP (reduce_batch
-    // tem 7 + 4 extras), então 12 eventos são suficientes para cobrir um call.
-    static constexpr int PERF_RING = MR_PERF_RING;
-    cudaEvent_t ev_ring[MR_PERF_RING + 1] = {};   // PERF_RING seções → PERF_RING+1 marcos
-    float*      acc_ring[MR_PERF_RING]    = {};   // ponteiro para o acumulador de cada seção
-    int         ring_cur               = 0;    // número de seções abertas
+    // 12 cobre as 11 seções máximas de mont_mul_batch (reduce tem 7 + 4 extras).
+    static constexpr int PERF_RING = 32;
+    cudaEvent_t ev_ring[PERF_RING + 1] = {};
+    float*      acc_ring[PERF_RING]    = {};
+    int         ring_cur               = 0;
 
     int device_id = 0;  // GPU utilizada
 

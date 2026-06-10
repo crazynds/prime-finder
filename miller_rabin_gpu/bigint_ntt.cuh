@@ -41,8 +41,13 @@ struct BigIntNTTBatch {
     Root64* d_fwd_table = nullptr;
     Root64* d_inv_table = nullptr;
 
-    Data64* d_buf_A      = nullptr;
-    Data64* d_buf_B      = nullptr;
+    // d_buf_A e d_buf_B são contíguos: d_buf_AB[0..n_batch*padded-1] = A,
+    // d_buf_AB[n_batch*padded..2*n_batch*padded-1] = B.
+    // Isso permite chamar GPU_NTT_Inplace(d_buf_A, 2*n_batch) para transformar
+    // A e B em um único lançamento de kernel.
+    Data64* d_buf_AB     = nullptr;  // alocação única [2 * n_batch * padded]
+    Data64* d_buf_A      = nullptr;  // aponta para d_buf_AB
+    Data64* d_buf_B      = nullptr;  // aponta para d_buf_AB + n_batch * padded
     Data64* d_tile_carry = nullptr;  // [n_batch * n_tiles] carry inter-tile
 
     explicit BigIntNTTBatch(int n_limbs_, int n_batch_);
@@ -52,6 +57,8 @@ struct BigIntNTTBatch {
     void ntt_A(const Data64* d_src, int n_src, cudaStream_t s = 0);
     // Idem para d_buf_B
     void ntt_B(const Data64* d_src, int n_src, cudaStream_t s = 0);
+    // Carrega d_srcA em buf_A e d_srcB em buf_B, depois NTT em batch (2*n_batch de uma vez)
+    void ntt_AB(const Data64* d_srcA, const Data64* d_srcB, int n_src, cudaStream_t s = 0);
 
     // d_buf_A = d_buf_A * d_buf_B (pointwise), INTT -> d_buf_A
     void pmul_and_intt(cudaStream_t s = 0);

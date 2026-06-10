@@ -1,47 +1,58 @@
 #pragma once
 // config.cuh — Parâmetros configuráveis do Miller-Rabin GPU.
-//
-// Modifique aqui para ajustar performance e comportamento sem tocar no código interno.
 
-// ── Exponenciação por janela deslizante ──────────────────────────────────────
-// Bits por janela. Maior valor = menos multiplicações, mas mais memória para a tabela.
-// Tabela consome: 2^MR_WINDOW_BITS * n_total * n_limbs * 8 bytes.
-// Valores razoáveis: 4–10. Padrão: 8.
-#ifndef MR_WINDOW_BITS
-#  define MR_WINDOW_BITS 8
-#endif
-#define MR_WINDOW_SIZE (1 << MR_WINDOW_BITS)
+/** --------------------------------------------------
+                        Algoritmo
+------------------------------------------------------*/
 
-// ── Tamanho do batch ──────────────────────────────────────────────────────────
-// Candidatos processados por chamada ao GPU. Afeta uso de VRAM.
-// Reduzir se ficar sem memória; aumentar em GPUs com muita VRAM.
-#ifndef MR_BATCH_SIZE
-#  define MR_BATCH_SIZE 128
-#endif
+// Janela de exponenciação. Range: 4–10.
+#define MR_WINDOW_BITS 8
 
-// ── Threads por bloco (kernels internos) ─────────────────────────────────────
-// Usado em select_window_kernel, check_equals_kernel e cs_apply.
-// Deve ser múltiplo de 32 (warp size). Padrão: 256.
-#ifndef MR_BLOCK_THREADS
-#  define MR_BLOCK_THREADS 256
-#endif
+// Candidatos por chamada GPU. Quanto maior, mais VRAM usada.
+#define MR_BATCH_SIZE 32
 
-// ── Tile de cond_sub (montgomery.cu) ─────────────────────────────────────────
-// Elementos por tile na subtração condicional tileada.
-// Deve ser potência de 2 e múltiplo de MR_BLOCK_THREADS.
-#ifndef MR_CS_TILE
-#  define MR_CS_TILE 256
-#endif
+/** --------------------------------------------------
+                    Threads por bloco
+         Todos devem ser múltiplo de 32 (warp size).
+------------------------------------------------------*/
 
-// ── Ring de eventos CUDA (profiling interno) ──────────────────────────────────
-// Profundidade do ring de cudaEvent_t usado para medir tempo dos kernels.
-// Precisa ser >= número de seções cronometradas por mont_mul_batch (atualmente 11).
-#ifndef MR_PERF_RING
-#  define MR_PERF_RING 12
-#endif
+// load_padded_batch: copia e zero-pad limbs de entrada para o buffer NTT
+#define MR_THR_LOAD 256
+// pmul_batch / psq_batch: multiplicação/quadrado pointwise no domínio NTT
+#define MR_THR_PMUL 256
+// extract_low / shift_right: kernels de redução Montgomery (reduce_batch)
+#define MR_THR_REDUCE 256
+// select_window_kernel: lê a entrada correta da tabela de potências para a janela atual
+#define MR_THR_SELECT_WIN 256
+// check_passed_kernel / check_equals_kernel: compara resultado MR com 1 ou N-1
+#define MR_THR_CHECK 256
+// carry_inter_tiles: propaga carry entre tiles, 1 thread por candidato
+#define MR_CARRY_INTER_THR 32
 
-// ── Intervalo da barra de progresso ──────────────────────────────────────────
-// Tempo mínimo entre atualizações da barra de progresso, em milissegundos.
-#ifndef MR_PROGRESS_INTERVAL_MS
-#  define MR_PROGRESS_INTERVAL_MS 2000
-#endif
+/** --------------------------------------------------
+                   Carry normalização
+------------------------------------------------------*/
+
+// carry_intra_copy / carry_16bits: tamanho do tile (= threads por bloco). Reduzir se smem estourar.
+#define MR_CARRY_TILE 32
+
+// Descomente para usar o algoritmo 2-fase (carry_intra_copy + carry_inter_tiles).
+// Por padrão usa carry_16bits (1 kernel, 1 bloco por candidato).
+// #define CARRY_MULTI_TILE
+
+// Descomente para carry_intra_copy usar 1 thread sequencial por tile (só com CARRY_MULTI_TILE).
+// #define CARRY_INTRA_SEQUENTIAL
+
+/** --------------------------------------------------
+              Subtração condicional (cond_sub)
+------------------------------------------------------*/
+
+// cs_phase1 / cs_apply: tamanho do tile da subtração condicional (cond_sub_batch)
+#define MR_CS_TILE 256
+
+/** --------------------------------------------------
+                       Monitoring
+------------------------------------------------------*/
+
+// Intervalo mínimo entre atualizações da barra de progresso (ms).
+#define MR_PROGRESS_INTERVAL_MS 2000

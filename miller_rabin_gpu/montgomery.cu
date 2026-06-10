@@ -440,8 +440,8 @@ void BatchMontCtx::from_mont_batch(const Data64* d_x, std::vector<uint64_t>& out
 void BatchMontCtx::check_passed(const Data64* d_r_mont, uint8_t* d_passed,
                                   cudaStream_t s) const
 {
-    // Um bloco por candidato, 256 threads para varrer n_limbs em paralelo
-    check_passed_kernel<<<n_batch, 256, 0, s>>>(
+    // Um bloco por candidato, MR_THR_CHECK threads para varrer n_limbs em paralelo
+    check_passed_kernel<<<n_batch, MR_THR_CHECK, 0, s>>>(
         d_r_mont, d_one_mont, d_Nm1_mont, d_passed, n_limbs);
 }
 
@@ -458,45 +458,70 @@ void BatchMontCtx::check_passed(const Data64* d_r_mont, uint8_t* d_passed,
         ring_cur++; \
     } while(0)
 
+// Redução Montgomery: dado T = A*B (ou A²) em d_T [n_batch * n_sum],
+// calcula out = T * R^{-1} mod N para cada candidato.
+//
+// Algoritmo (REDC):
+//   m  = (T mod R) * N' mod R      -- fator de correção
+//   t  = (T + m*N) / R             -- elimina os n_limbs limbs baixos
+//   if t >= N: out = t - N         -- redução final (cond_sub, feita pelo chamador)
+//   else:      out = t
+//
+// Como T e m*N são polinômios grandes, a multiplicação é via NTT.
+// R = 2^(LIMB_BITS * n_limbs).
 void BatchMontCtx::reduce_batch(Data64* d_out, cudaStream_t s)
 {
-    const int thr = 256;
+    const int thr = MR_THR_REDUCE;
     unsigned bp = (unsigned)(padded  + thr-1)/thr;
     unsigned bl = (unsigned)(n_limbs + thr-1)/thr;
     unsigned nb = (unsigned)n_batch;
 
-    // m = T_low * N' mod R:
+    // Passo 1: m = (T mod R) * N' mod R
+    //   T mod R = T_low = primeiros n_limbs limbs de T.
+    //   extract_low copia T_low para buf_A (zerado até padded).
+    //   fwd_A aplica NTT forward em buf_A, preparando para pmul.
     TSTART();
     extract_low_batch<<<dim3(bp,nb), thr, 0, s>>>(
         ntt.d_buf_A, d_T, n_limbs, padded, n_sum, n_batch);
     ntt.fwd_A(s);
-    TSTOP(perf.ntt_fwd_ms);
+    TSTOP(perf.red_ntt_tlow_ms);
 
+    // Passo 2: buf_A = INTT(NTT(T_low) * NTT(N')) = T_low * N' (convolução polinomial)
+    //   Resultado raw (sem carry) fica em buf_A.
     TSTART();
     ntt.pmul_ext_and_intt(d_ntt_Nprime, s);
-    TSTOP(perf.ntt_inv_ms);
+    TSTOP(perf.red_pmul_np_ms);
 
+    // Passo 3: normaliza m — propaga carries nos coeficientes brutos do INTT.
+    //   Resultado normalizado (limbs de 16 bits) vai para d_m [n_batch * n_limbs].
     TSTART();
     ntt.carry_to_limbs(d_m, n_limbs, CARRY_PASSES_MUL, s);
-    TSTOP(perf.carry_ms);
+    TSTOP(perf.red_carry_m_ms);
 
-    // mN = m * N:
+    // Passo 4: mN = m * N
+    //   Transforma m para o domínio NTT para multiplicar por NTT(N) pré-computado.
     TSTART();
     ntt.ntt_A(d_m, n_limbs, s);
-    TSTOP(perf.ntt_fwd_ms);
+    TSTOP(perf.red_ntt_m_ms);
 
+    // Passo 5: buf_A = INTT(NTT(m) * NTT(N)) = m * N (convolução polinomial)
     TSTART();
     ntt.pmul_ext_and_intt(d_ntt_N, s);
-    TSTOP(perf.ntt_inv_ms);
+    TSTOP(perf.red_pmul_n_ms);
 
+    // Passo 6: T += mN, normaliza carries.
+    //   (T + mN) é divisível por R por construção; o resultado normalizado
+    //   fica em d_T [n_batch * n_sum] pronto para o shift.
     TSTART();
     ntt.add_raw_buf_and_carry(d_T, n_sum, CARRY_PASSES_ADD, s);
-    TSTOP(perf.carry_ms);
+    TSTOP(perf.red_add_carry_ms);
 
+    // Passo 7: out = (T + mN) / R = shift direito por n_limbs posições.
+    //   shift_right copia d_T[n_limbs .. n_limbs+n_limbs-1] para d_out.
     TSTART();
     shift_right_batch<<<dim3(bl,nb), thr, 0, s>>>(
         d_out, d_T, n_limbs, n_limbs, n_sum, n_batch);
-    TSTOP(perf.other_ms);
+    TSTOP(perf.red_shift_ms);
 }
 
 void BatchMontCtx::cond_sub_batch(Data64* d_x, cudaStream_t s)
@@ -510,46 +535,73 @@ void BatchMontCtx::cond_sub_batch(Data64* d_x, cudaStream_t s)
         d_x, d_N, d_cs_tile_bin, n_limbs, n_batch);
 }
 
+// Multiplicação Montgomery: out = A * B * R^{-1} mod N para cada candidato.
+//
+// R = 2^(LIMB_BITS * n_limbs). Entrada e saída estão em forma Montgomery
+// (A_mont = A*R mod N), então mont_mul(A_mont, B_mont) = A*B*R mod N.
 void BatchMontCtx::mont_mul_batch(const Data64* d_A, const Data64* d_B, Data64* d_out,
                                    cudaStream_t s)
 {
+    // Passo 1: NTT(A) e NTT(B) em batch único (2*n_batch polinômios de uma vez).
+    //   load_padded copia e zero-pads A→buf_A e B→buf_B, depois um único
+    //   GPU_NTT_Inplace(2*n_batch) transforma ambos — metade dos lançamentos vs chamadas separadas.
     TSTART();
-    ntt.ntt_A(d_A, n_limbs, s);
-    ntt.ntt_B(d_B, n_limbs, s);
-    TSTOP(perf.ntt_fwd_ms);
+    ntt.ntt_AB(d_A, d_B, n_limbs, s);
+    TSTOP(perf.ntt_input_ms);
 
+    // Passo 2: T = INTT(NTT(A) * NTT(B)) = A * B (convolução polinomial, raw sem carry).
+    //   pmul_batch multiplica coeficiente a coeficiente no domínio NTT,
+    //   depois INTT traz o produto de volta. Resultado raw fica em buf_A.
     TSTART();
     ntt.pmul_and_intt(s);
-    TSTOP(perf.ntt_inv_ms);
+    TSTOP(perf.ntt_product_ms);
 
+    // Passo 3: normaliza T — propaga carries dos coeficientes brutos do INTT.
+    //   Resultado vai para d_T [n_batch * n_sum] com limbs de 16 bits.
     TSTART();
     ntt.carry_to_limbs(d_T, n_sum, CARRY_PASSES_MUL, s);
-    TSTOP(perf.carry_ms);
+    TSTOP(perf.carry_product_ms);
 
+    // Passo 4: redução Montgomery — out = T * R^{-1} mod N.
     reduce_batch(d_out, s);
 
+    // Passo 5: subtração condicional — garante out < N.
+    //   Se out >= N após a redução, subtrai N (raro mas possível).
     TSTART();
     cond_sub_batch(d_out, s);
     TSTOP(perf.cond_sub_ms);
     perf_flush(s);  // único sync por chamada
 }
 
+// Quadrado Montgomery: out = A² * R^{-1} mod N para cada candidato.
+//
+// Equivalente a mont_mul_batch(A, A, out) mas usa psq (pointwise square)
+// no domínio NTT em vez de pmul — economiza NTT(B) e metade das multiplicações.
 void BatchMontCtx::mont_sq_batch(const Data64* d_A, Data64* d_out, cudaStream_t s)
 {
+    // Passo 1: NTT(A) — transforma A para o domínio NTT.
     TSTART();
     ntt.ntt_A(d_A, n_limbs, s);
-    TSTOP(perf.ntt_fwd_ms);
+    TSTOP(perf.ntt_input_ms);
 
+    // Passo 2: T = INTT(NTT(A)²) = A² (convolução polinomial, raw sem carry).
+    //   psq_batch eleva cada coeficiente ao quadrado no domínio NTT,
+    //   depois INTT traz de volta. Resultado raw fica em buf_A.
     TSTART();
     ntt.psq_and_intt(s);
-    TSTOP(perf.ntt_inv_ms);
+    TSTOP(perf.ntt_product_ms);
 
+    // Passo 3: normaliza T — propaga carries dos coeficientes brutos do INTT.
+    //   Resultado vai para d_T [n_batch * n_sum] com limbs de 16 bits.
     TSTART();
     ntt.carry_to_limbs(d_T, n_sum, CARRY_PASSES_MUL, s);
-    TSTOP(perf.carry_ms);
+    TSTOP(perf.carry_product_ms);
 
+    // Passo 4: redução Montgomery — out = T * R^{-1} mod N.
     reduce_batch(d_out, s);
 
+    // Passo 5: subtração condicional — garante out < N.
+    //   Se out >= N após a redução, subtrai N (raro mas possível).
     TSTART();
     cond_sub_batch(d_out, s);
     TSTOP(perf.cond_sub_ms);
