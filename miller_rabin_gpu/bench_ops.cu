@@ -8,7 +8,7 @@
 #include "bench_ops.cuh"
 #include "montgomery.cuh"
 #include "miller_rabin_runner.cuh"
-#include "config.cuh"
+#include "config.h"
 #include <gmp.h>
 #include <cstdio>
 #include <cstring>
@@ -26,7 +26,7 @@ using dsec = std::chrono::duration<double>;
 static constexpr double BENCH_SECS = 3.0;
 static constexpr int N_BATCH = MR_BATCH_SIZE;
 static constexpr int BIT_SIZES_SHORT[] = {128, 1024, 4096, 16384, 65536};
-static constexpr int BIT_SIZES_LONG[]  = {128, 1024, 4096, 16384, 65536, 131072, 262144};
+static constexpr int BIT_SIZES_LONG[] = {128, 1024, 4096, 16384, 65536, 131072, 262144};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -70,20 +70,25 @@ static std::string fmt_ops(double ops)
 static BenchResult bench_gmp_mul_only(int n_bits, bool is_last)
 {
     __mpz_struct A, B, C;
-    mpz_init(&A); mpz_init(&B); mpz_init(&C);
+    mpz_init(&A);
+    mpz_init(&B);
+    mpz_init(&C);
     rand_odd_mpz(&A, n_bits, rng_state);
     rand_odd_mpz(&B, n_bits, rng_state);
 
     long long ops = 0;
     auto t0 = hrc::now();
     double elapsed = 0;
-    do {
+    do
+    {
         mpz_mul(&C, &A, &B);
         ops++;
         elapsed = dsec(hrc::now() - t0).count();
     } while (elapsed < BENCH_SECS || (is_last && ops < 1));
 
-    mpz_clear(&A); mpz_clear(&B); mpz_clear(&C);
+    mpz_clear(&A);
+    mpz_clear(&B);
+    mpz_clear(&C);
     return {ops / elapsed, ops, elapsed};
 }
 
@@ -91,19 +96,22 @@ static BenchResult bench_gmp_mul_only(int n_bits, bool is_last)
 static BenchResult bench_gmp_sq_only(int n_bits, bool is_last)
 {
     __mpz_struct A, C;
-    mpz_init(&A); mpz_init(&C);
+    mpz_init(&A);
+    mpz_init(&C);
     rand_odd_mpz(&A, n_bits, rng_state);
 
     long long ops = 0;
     auto t0 = hrc::now();
     double elapsed = 0;
-    do {
+    do
+    {
         mpz_mul(&C, &A, &A);
         ops++;
         elapsed = dsec(hrc::now() - t0).count();
     } while (elapsed < BENCH_SECS || (is_last && ops < 1));
 
-    mpz_clear(&A); mpz_clear(&C);
+    mpz_clear(&A);
+    mpz_clear(&C);
     return {ops / elapsed, ops, elapsed};
 }
 
@@ -111,7 +119,10 @@ static BenchResult bench_gmp_sq_only(int n_bits, bool is_last)
 static BenchResult bench_gmp_mul(int n_bits, bool is_last)
 {
     __mpz_struct A, B, N, C;
-    mpz_init(&A); mpz_init(&B); mpz_init(&N); mpz_init(&C);
+    mpz_init(&A);
+    mpz_init(&B);
+    mpz_init(&N);
+    mpz_init(&C);
     rand_odd_mpz(&A, n_bits, rng_state);
     rand_odd_mpz(&B, n_bits, rng_state);
     rand_odd_mpz(&N, n_bits, rng_state);
@@ -119,14 +130,18 @@ static BenchResult bench_gmp_mul(int n_bits, bool is_last)
     long long ops = 0;
     auto t0 = hrc::now();
     double elapsed = 0;
-    do {
+    do
+    {
         mpz_mul(&C, &A, &B);
         mpz_mod(&C, &C, &N);
         ops++;
         elapsed = dsec(hrc::now() - t0).count();
     } while (elapsed < BENCH_SECS || (is_last && ops < 1));
 
-    mpz_clear(&A); mpz_clear(&B); mpz_clear(&N); mpz_clear(&C);
+    mpz_clear(&A);
+    mpz_clear(&B);
+    mpz_clear(&N);
+    mpz_clear(&C);
     return {ops / elapsed, ops, elapsed};
 }
 
@@ -134,21 +149,26 @@ static BenchResult bench_gmp_mul(int n_bits, bool is_last)
 static BenchResult bench_gmp_sq(int n_bits, bool is_last)
 {
     __mpz_struct A, N, C;
-    mpz_init(&A); mpz_init(&N); mpz_init(&C);
+    mpz_init(&A);
+    mpz_init(&N);
+    mpz_init(&C);
     rand_odd_mpz(&A, n_bits, rng_state);
     rand_odd_mpz(&N, n_bits, rng_state);
 
     long long ops = 0;
     auto t0 = hrc::now();
     double elapsed = 0;
-    do {
+    do
+    {
         mpz_mul(&C, &A, &A);
         mpz_mod(&C, &C, &N);
         ops++;
         elapsed = dsec(hrc::now() - t0).count();
     } while (elapsed < BENCH_SECS || (is_last && ops < 1));
 
-    mpz_clear(&A); mpz_clear(&N); mpz_clear(&C);
+    mpz_clear(&A);
+    mpz_clear(&N);
+    mpz_clear(&C);
     return {ops / elapsed, ops, elapsed};
 }
 
@@ -182,12 +202,15 @@ static BenchResult bench_gpu_mul_only(int n_bits, bool is_last)
     make_nums(storage, nums, n_bits);
 
     BenchResult res = {};
-    try {
+    try
+    {
         BatchMontCtx ctx(nums, 0);
         size_t nb = (size_t)N_BATCH * ctx.n_limbs * sizeof(Data64);
         size_t nb_out = (size_t)N_BATCH * ctx.n_sum * sizeof(Data64);
         Data64 *d_A, *d_B, *d_out;
-        cudaMalloc(&d_A, nb); cudaMalloc(&d_B, nb); cudaMalloc(&d_out, nb_out);
+        cudaMalloc(&d_A, nb);
+        cudaMalloc(&d_B, nb);
+        cudaMalloc(&d_out, nb_out);
         cudaMemcpy(d_A, ctx.d_one_mont, nb, cudaMemcpyDeviceToDevice);
         cudaMemcpy(d_B, ctx.d_Nm1_mont, nb, cudaMemcpyDeviceToDevice);
         cudaDeviceSynchronize();
@@ -195,15 +218,20 @@ static BenchResult bench_gpu_mul_only(int n_bits, bool is_last)
         long long rounds = 0;
         auto t0 = hrc::now();
         double elapsed = 0;
-        do {
+        do
+        {
             ctx.mul_no_redc_batch(d_A, d_B, d_out);
             rounds++;
             elapsed = dsec(hrc::now() - t0).count();
         } while (elapsed < BENCH_SECS || (is_last && rounds < 1));
 
         res = {(double)(rounds * N_BATCH) / elapsed, rounds * N_BATCH, elapsed};
-        cudaFree(d_A); cudaFree(d_B); cudaFree(d_out);
-    } catch (const std::exception& e) {
+        cudaFree(d_A);
+        cudaFree(d_B);
+        cudaFree(d_out);
+    }
+    catch (const std::exception &e)
+    {
         fprintf(stderr, "  [GPU mul-only %d-bit] ERRO: %s\n", n_bits, e.what());
         res.skipped = true;
     }
@@ -219,27 +247,33 @@ static BenchResult bench_gpu_sq_only(int n_bits, bool is_last)
     make_nums(storage, nums, n_bits);
 
     BenchResult res = {};
-    try {
+    try
+    {
         BatchMontCtx ctx(nums, 0);
         size_t nb = (size_t)N_BATCH * ctx.n_limbs * sizeof(Data64);
         size_t nb_out = (size_t)N_BATCH * ctx.n_sum * sizeof(Data64);
         Data64 *d_A, *d_out;
-        cudaMalloc(&d_A, nb); cudaMalloc(&d_out, nb_out);
+        cudaMalloc(&d_A, nb);
+        cudaMalloc(&d_out, nb_out);
         cudaMemcpy(d_A, ctx.d_one_mont, nb, cudaMemcpyDeviceToDevice);
         cudaDeviceSynchronize();
 
         long long rounds = 0;
         auto t0 = hrc::now();
         double elapsed = 0;
-        do {
+        do
+        {
             ctx.sq_no_redc_batch(d_A, d_out);
             rounds++;
             elapsed = dsec(hrc::now() - t0).count();
         } while (elapsed < BENCH_SECS || (is_last && rounds < 1));
 
         res = {(double)(rounds * N_BATCH) / elapsed, rounds * N_BATCH, elapsed};
-        cudaFree(d_A); cudaFree(d_out);
-    } catch (const std::exception& e) {
+        cudaFree(d_A);
+        cudaFree(d_out);
+    }
+    catch (const std::exception &e)
+    {
         fprintf(stderr, "  [GPU sq-only %d-bit] ERRO: %s\n", n_bits, e.what());
         res.skipped = true;
     }
@@ -388,22 +422,29 @@ static bool gmp_mr_single(__mpz_struct *N, __mpz_struct *Nm1, __mpz_struct *d, i
 static BenchResult bench_gmp_mr(int n_bits, bool is_last)
 {
     __mpz_struct num, Nm1, d, tmp;
-    mpz_init(&num); mpz_init(&Nm1); mpz_init(&d); mpz_init(&tmp);
+    mpz_init(&num);
+    mpz_init(&Nm1);
+    mpz_init(&d);
+    mpz_init(&tmp);
     rand_odd_mpz(&num, n_bits, rng_state);
-    mpz_setbit(&num, 1);             // força N ≡ 3 mod 4
-    mpz_sub_ui(&Nm1, &num, 1);       // N-1 = 2*d
-    mpz_tdiv_q_2exp(&d, &Nm1, 1);    // d = (N-1)/2
+    mpz_setbit(&num, 1);          // força N ≡ 3 mod 4
+    mpz_sub_ui(&Nm1, &num, 1);    // N-1 = 2*d
+    mpz_tdiv_q_2exp(&d, &Nm1, 1); // d = (N-1)/2
 
     long long ops = 0;
     auto t0 = hrc::now();
     double elapsed = 0;
-    do {
+    do
+    {
         gmp_mr_single(&num, &Nm1, &d, 1, &tmp);
         ops++;
         elapsed = dsec(hrc::now() - t0).count();
     } while (elapsed < BENCH_SECS || (is_last && ops < 1));
 
-    mpz_clear(&num); mpz_clear(&Nm1); mpz_clear(&d); mpz_clear(&tmp);
+    mpz_clear(&num);
+    mpz_clear(&Nm1);
+    mpz_clear(&d);
+    mpz_clear(&tmp);
     return {ops / elapsed, ops, elapsed};
 }
 
@@ -467,9 +508,9 @@ static BenchResult bench_gpu_mr(int n_bits, bool is_last)
 
 void run_bench_ops(bool long_run)
 {
-    const int* BIT_SIZES = long_run ? BIT_SIZES_LONG  : BIT_SIZES_SHORT;
-    const int  N_SIZES   = long_run ? (int)(sizeof(BIT_SIZES_LONG)  / sizeof(BIT_SIZES_LONG[0]))
-                                    : (int)(sizeof(BIT_SIZES_SHORT) / sizeof(BIT_SIZES_SHORT[0]));
+    const int *BIT_SIZES = long_run ? BIT_SIZES_LONG : BIT_SIZES_SHORT;
+    const int N_SIZES = long_run ? (int)(sizeof(BIT_SIZES_LONG) / sizeof(BIT_SIZES_LONG[0]))
+                                 : (int)(sizeof(BIT_SIZES_SHORT) / sizeof(BIT_SIZES_SHORT[0]));
 
     gmp_randinit_mt(rng_state);
     gmp_randseed_ui(rng_state, 0xDEADBEEF);
@@ -515,43 +556,53 @@ void run_bench_ops(bool long_run)
         bool last = (c == N_SIZES - 1);
         printf("── %d bits ──\n", bits);
 
-        printf("  GPU mul          ... "); fflush(stdout);
+        printf("  GPU mul          ... ");
+        fflush(stdout);
         results[0][c] = bench_gpu_mul_only(bits, last);
         printf("%.2fs\n", results[0][c].elapsed_sec);
 
-        printf("  GPU sq           ... "); fflush(stdout);
+        printf("  GPU sq           ... ");
+        fflush(stdout);
         results[1][c] = bench_gpu_sq_only(bits, last);
         printf("%.2fs\n", results[1][c].elapsed_sec);
 
-        printf("  GPU mont_mul     ... "); fflush(stdout);
+        printf("  GPU mont_mul     ... ");
+        fflush(stdout);
         results[2][c] = bench_gpu_mul(bits, last);
         printf("%.2fs\n", results[2][c].elapsed_sec);
 
-        printf("  GPU mont_sq      ... "); fflush(stdout);
+        printf("  GPU mont_sq      ... ");
+        fflush(stdout);
         results[3][c] = bench_gpu_sq(bits, last);
         printf("%.2fs\n", results[3][c].elapsed_sec);
 
-        printf("  GPU miller-rabin ... "); fflush(stdout);
+        printf("  GPU miller-rabin ... ");
+        fflush(stdout);
         results[4][c] = bench_gpu_mr(bits, last);
         printf("%.2fs\n", results[4][c].elapsed_sec);
 
-        printf("  GMP mul          ... "); fflush(stdout);
+        printf("  GMP mul          ... ");
+        fflush(stdout);
         results[5][c] = bench_gmp_mul_only(bits, last);
         printf("%.2fs\n", results[5][c].elapsed_sec);
 
-        printf("  GMP sq           ... "); fflush(stdout);
+        printf("  GMP sq           ... ");
+        fflush(stdout);
         results[6][c] = bench_gmp_sq_only(bits, last);
         printf("%.2fs\n", results[6][c].elapsed_sec);
 
-        printf("  GMP mul+mod      ... "); fflush(stdout);
+        printf("  GMP mul+mod      ... ");
+        fflush(stdout);
         results[7][c] = bench_gmp_mul(bits, last);
         printf("%.2fs\n", results[7][c].elapsed_sec);
 
-        printf("  GMP sq+mod       ... "); fflush(stdout);
+        printf("  GMP sq+mod       ... ");
+        fflush(stdout);
         results[8][c] = bench_gmp_sq(bits, last);
         printf("%.2fs\n", results[8][c].elapsed_sec);
 
-        printf("  GMP miller-rabin ... "); fflush(stdout);
+        printf("  GMP miller-rabin ... ");
+        fflush(stdout);
         results[9][c] = bench_gmp_mr(bits, last);
         printf("%.2fs\n\n", results[9][c].elapsed_sec);
     }

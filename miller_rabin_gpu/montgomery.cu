@@ -542,18 +542,23 @@ void BatchMontCtx::cond_sub_batch(Data64* d_x, cudaStream_t s)
 void BatchMontCtx::mont_mul_batch(const Data64* d_A, const Data64* d_B, Data64* d_out,
                                    cudaStream_t s)
 {
-    // Passo 1: NTT(A) e NTT(B) em batch único (2*n_batch polinômios de uma vez).
-    //   load_padded copia e zero-pads A→buf_A e B→buf_B, depois um único
-    //   GPU_NTT_Inplace(2*n_batch) transforma ambos — metade dos lançamentos vs chamadas separadas.
+    // Passo 1 — produto polinomial A * B → d_buf_A (raw, sem carry).
+    //   NTT: transforma A e B, multiplica pontualmente, INTT de volta.
+    //   SCHOOLBOOK: convolução direta O(n²), escreve coefs brutos em d_buf_A.
     TSTART();
+#if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     ntt.ntt_AB(d_A, d_B, n_limbs, s);
+#elif MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
+    ntt.schoolbook_mul(d_A, d_B, n_limbs, s);
+#endif
     TSTOP(perf.ntt_input_ms);
 
-    // Passo 2: T = INTT(NTT(A) * NTT(B)) = A * B (convolução polinomial, raw sem carry).
-    //   pmul_batch multiplica coeficiente a coeficiente no domínio NTT,
-    //   depois INTT traz o produto de volta. Resultado raw fica em buf_A.
+    // Passo 2 — (apenas NTT) multiplicação pontual + INTT.
+    //   Para SCHOOLBOOK, d_buf_A já tem os coefs brutos do passo anterior.
     TSTART();
+#if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     ntt.pmul_and_intt(s);
+#endif
     TSTOP(perf.ntt_product_ms);
 
     // Passo 3: normaliza T — propaga carries dos coeficientes brutos do INTT.
@@ -579,16 +584,20 @@ void BatchMontCtx::mont_mul_batch(const Data64* d_A, const Data64* d_B, Data64* 
 // no domínio NTT em vez de pmul — economiza NTT(B) e metade das multiplicações.
 void BatchMontCtx::mont_sq_batch(const Data64* d_A, Data64* d_out, cudaStream_t s)
 {
-    // Passo 1: NTT(A) — transforma A para o domínio NTT.
+    // Passo 1 — quadrado polinomial A² → d_buf_A (raw, sem carry).
     TSTART();
+#if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     ntt.ntt_A(d_A, n_limbs, s);
+#elif MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
+    ntt.schoolbook_sq(d_A, n_limbs, s);
+#endif
     TSTOP(perf.ntt_input_ms);
 
-    // Passo 2: T = INTT(NTT(A)²) = A² (convolução polinomial, raw sem carry).
-    //   psq_batch eleva cada coeficiente ao quadrado no domínio NTT,
-    //   depois INTT traz de volta. Resultado raw fica em buf_A.
+    // Passo 2 — (apenas NTT) PSQ pontual + INTT.
     TSTART();
+#if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     ntt.psq_and_intt(s);
+#endif
     TSTOP(perf.ntt_product_ms);
 
     // Passo 3: normaliza T — propaga carries dos coeficientes brutos do INTT.

@@ -69,6 +69,12 @@ struct BigIntNTTBatch {
     // Apenas NTT forward em d_buf_A (ja preenchido externamente com zero-pad)
     void fwd_A(cudaStream_t s = 0);
 
+    // Convolução polinomial direta O(n²) — escreve em d_buf_A (stride=padded).
+    // Alternativa ao par ntt_AB + pmul_and_intt. Só prático para n_limbs pequeno.
+    void schoolbook_mul(const Data64* d_A, const Data64* d_B, int n_src, cudaStream_t s = 0);
+    // Versão quadrado O(n²) — alternativa a ntt_A + psq_and_intt.
+    void schoolbook_sq(const Data64* d_A, int n_src, cudaStream_t s = 0);
+
     // Copia d_buf_A -> d_out [n_batch * n_out] e normaliza carries
     void carry_to_limbs(Data64* d_out, int n_out, int n_passes = CARRY_PASSES_MUL,
                         cudaStream_t s = 0);

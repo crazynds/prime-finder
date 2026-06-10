@@ -82,22 +82,22 @@ Dois construtores disponíveis:
 BatchMontCtx mont(N_all, n_limbs, n_batch, device_id = 0);
 ```
 
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
-| `N_all` | `const vector<uint64_t>&` | Array flat `[n_batch × n_limbs]` com os módulos N, little-endian 16-bit |
-| `n_limbs` | `int` | Limbs de 16 bits por candidato |
-| `n_batch` | `int` | Número de candidatos no batch |
-| `device_id` | `int` | Índice da GPU (padrão: 0; use `cudaGetDeviceCount` para listar) |
+| Parâmetro   | Tipo                      | Descrição                                                               |
+| ----------- | ------------------------- | ----------------------------------------------------------------------- |
+| `N_all`     | `const vector<uint64_t>&` | Array flat `[n_batch × n_limbs]` com os módulos N, little-endian 16-bit |
+| `n_limbs`   | `int`                     | Limbs de 16 bits por candidato                                          |
+| `n_batch`   | `int`                     | Número de candidatos no batch                                           |
+| `device_id` | `int`                     | Índice da GPU (padrão: 0; use `cudaGetDeviceCount` para listar)         |
 
 ```cpp
 // Construtor 2: diretamente de mpz_t — calcula n_limbs automaticamente
 BatchMontCtx mont(numbers, device_id = 0);
 ```
 
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
-| `numbers` | `const vector<mpz_t*>&` | Ponteiros para os módulos N como mpz_t |
-| `device_id` | `int` | Índice da GPU (padrão: 0) |
+| Parâmetro   | Tipo                    | Descrição                              |
+| ----------- | ----------------------- | -------------------------------------- |
+| `numbers`   | `const vector<mpz_t*>&` | Ponteiros para os módulos N como mpz_t |
+| `device_id` | `int`                   | Índice da GPU (padrão: 0)              |
 
 ### Métodos
 
@@ -268,35 +268,35 @@ for (int i = 0; i < n_batch; i++)
 
 ## Parâmetros configuráveis
 
-Todos os parâmetros de tuning estão centralizados em `config.cuh`. Redefina-os antes de incluir qualquer header (via `-D` no compilador ou `#define` antes dos `#include`) para sobrescrever os padrões.
+Todos os parâmetros de tuning estão centralizados em `config.h`. Redefina-os antes de incluir qualquer header (via `-D` no compilador ou `#define` antes dos `#include`) para sobrescrever os padrões.
 
-| `#define` | Padrão | Descrição |
-|-----------|--------|-----------|
-| `MR_WINDOW_BITS` | `8` | Bits por janela na exponenciação sliding-window. Mais bits = menos muls, mais VRAM (tabela de 2^k entradas). |
-| `MR_BATCH_SIZE` | `128` | Candidatos por batch de GPU. Reduza se a VRAM for insuficiente. |
-| `MR_BLOCK_THREADS` | `256` | Threads por bloco CUDA (kernels internos). Deve ser múltiplo de 32. |
-| `MR_CS_TILE` | `256` | Tamanho do tile na subtração condicional de Montgomery. |
-| `MR_PERF_RING` | `12` | Profundidade do ring de eventos CUDA para profiling interno. |
-| `MR_PROGRESS_INTERVAL_MS` | `2000` | Intervalo mínimo (ms) entre atualizações da barra de progresso. |
+| `#define`                 | Padrão | Descrição                                                                                                    |
+| ------------------------- | ------ | ------------------------------------------------------------------------------------------------------------ |
+| `MR_WINDOW_BITS`          | `8`    | Bits por janela na exponenciação sliding-window. Mais bits = menos muls, mais VRAM (tabela de 2^k entradas). |
+| `MR_BATCH_SIZE`           | `128`  | Candidatos por batch de GPU. Reduza se a VRAM for insuficiente.                                              |
+| `MR_BLOCK_THREADS`        | `256`  | Threads por bloco CUDA (kernels internos). Deve ser múltiplo de 32.                                          |
+| `MR_CS_TILE`              | `256`  | Tamanho do tile na subtração condicional de Montgomery.                                                      |
+| `MR_PERF_RING`            | `12`   | Profundidade do ring de eventos CUDA para profiling interno.                                                 |
+| `MR_PROGRESS_INTERVAL_MS` | `2000` | Intervalo mínimo (ms) entre atualizações da barra de progresso.                                              |
 
 `miller_rabin_runner.cuh`:
 
-| Constante | Padrão | Descrição |
-|-----------|--------|-----------|
+| Constante           | Padrão       | Descrição                                                        |
+| ------------------- | ------------ | ---------------------------------------------------------------- |
 | `DEFAULT_WITNESSES` | 2,3,5,...,53 | Vetor padrão de 16 testemunhas; passe como argumento `witnesses` |
 
 `bigint_ntt.cuh`:
 
-| Constante | Padrão | Descrição |
-|-----------|--------|-----------|
-| `LIMB_BITS` | `16` | Bits por limb (redefina antes de incluir para usar 32) |
+| Constante   | Padrão | Descrição                                              |
+| ----------- | ------ | ------------------------------------------------------ |
+| `LIMB_BITS` | `16`   | Bits por limb (redefina antes de incluir para usar 32) |
 
 ---
 
 ## Arquivos da biblioteca
 
 ```
-config.cuh                — Parâmetros configuráveis (WINDOW_BITS, BATCH_SIZE, etc.)
+config.h                — Parâmetros configuráveis (WINDOW_BITS, BATCH_SIZE, etc.)
 miller_rabin_runner.cuh   — API pública: gpu_miller_rabin_s1, gpu_miller_rabin
 miller_rabin_runner.cu    — Implementação dos kernels de exponenciação
 montgomery.cuh            — API pública: BatchMontCtx

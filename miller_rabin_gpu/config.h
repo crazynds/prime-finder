@@ -1,5 +1,6 @@
 #pragma once
-// config.cuh — Parâmetros configuráveis do Miller-Rabin GPU.
+#include "constants.h"
+// config.h — Parâmetros configuráveis do Miller-Rabin GPU.
 
 /** --------------------------------------------------
                         Algoritmo
@@ -26,22 +27,36 @@
 #define MR_THR_SELECT_WIN 256
 // check_passed_kernel / check_equals_kernel: compara resultado MR com 1 ou N-1
 #define MR_THR_CHECK 256
-// carry_inter_tiles: propaga carry entre tiles, 1 thread por candidato
+// carry_inter_tiles (CARRY_ALG_MULTI_TILE): threads por bloco na fase inter-tile
 #define MR_CARRY_INTER_THR 32
 
 /** --------------------------------------------------
-                   Carry normalização
+             Carry normalização — algoritmos disponíveis
+
+  CARRY_ALG_SINGLE_TILE — 1 bloco por candidato, MR_CARRY_TILE threads.
+    Todos os tiles de um candidato processados por um único bloco com
+    shared-memory carry entre tiles. Menor ocupação de GPU mas simples.
+
+  CARRY_ALG_MULTI_TILE  — 2 fases separadas:
+    Fase 1 (intra): n_tiles × n_batch blocos em paralelo, cada um
+      normaliza MR_CARRY_TILE elementos com carry de saída em d_tile_carry.
+    Fase 2 (inter): 1 thread por candidato, propaga carries entre tiles
+      sequencialmente. Melhor ocupação na fase intra.
+
+  CARRY_ALG_SEQUENTIAL  — 1 thread por candidato, loop sequencial puro
+    sobre todos os elementos. Mínimo de shared memory, máxima serialização.
+    Útil como baseline ou quando outros algoritmos têm race conditions.
+
 ------------------------------------------------------*/
 
-// carry_intra_copy / carry_16bits: tamanho do tile (= threads por bloco). Reduzir se smem estourar.
-#define MR_CARRY_TILE 32
+// Selecione o algoritmo desejado:
+// #define CARRY_NORM_ALG CARRY_ALG_MULTI_TILE
+// #define CARRY_NORM_ALG CARRY_ALG_SINGLE_TILE
+#define CARRY_NORM_ALG CARRY_ALG_SEQUENTIAL
 
-// Descomente para usar o algoritmo 2-fase (carry_intra_copy + carry_inter_tiles).
-// Por padrão usa carry_16bits (1 kernel, 1 bloco por candidato).
-// #define CARRY_MULTI_TILE
-
-// Descomente para carry_intra_copy usar 1 thread sequencial por tile (só com CARRY_MULTI_TILE).
-// #define CARRY_INTRA_SEQUENTIAL
+// Tamanho da janeal de carry (threads por bloco).
+// Usado pelos algoritmos de TILE
+#define MR_CARRY_TILE 256
 
 /** --------------------------------------------------
               Subtração condicional (cond_sub)
@@ -56,3 +71,11 @@
 
 // Intervalo mínimo entre atualizações da barra de progresso (ms).
 #define MR_PROGRESS_INTERVAL_MS 2000
+
+/** --------------------------------------------------
+      Algoritmo de multiplicação big-integer
+      (mont_mul_batch / mont_sq_batch)
+------------------------------------------------------*/
+
+// #define MONT_MUL_ALG MONT_MUL_ALG_NTT
+#define MONT_MUL_ALG MONT_MUL_ALG_SCHOOLBOOK
