@@ -29,8 +29,10 @@ set(CMAKE_C_FLAGS_RELEASE   "-O3 -march=native -funroll-loops")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -funroll-loops")
 # Garante O3 mesmo sem -DCMAKE_BUILD_TYPE=Release explícito
 add_compile_options(
-    $<$<COMPILE_LANGUAGE:C>:-O3;-march=native>
-    $<$<COMPILE_LANGUAGE:CXX>:-O3;-march=native>
+    $<$<COMPILE_LANGUAGE:C>:-O3>
+    $<$<COMPILE_LANGUAGE:C>:-march=native>
+    $<$<COMPILE_LANGUAGE:CXX>:-O3>
+    $<$<COMPILE_LANGUAGE:CXX>:-march=native>
 )
 # NVCC: O3 + fast math + detecção automática de arquitetura via CMAKE_CUDA_ARCHITECTURES
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --use_fast_math")
