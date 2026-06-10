@@ -66,27 +66,29 @@ static std::vector<bool> test_batch(
 
 int main(int argc, char* argv[])
 {
-    bool run_tests     = false;
-    bool show_report   = false;
-    bool show_progress = false;
-    bool run_bench     = false;
+    bool run_tests      = false;
+    bool show_report    = false;
+    bool show_progress  = false;
+    bool run_bench      = false;
+    bool run_bench_long = false;
     const char* input_file = nullptr;
 
     for (int i = 1; i < argc; i++) {
-        if      (std::string(argv[i]) == "--test")      run_tests     = true;
-        else if (std::string(argv[i]) == "--report")    show_report   = true;
-        else if (std::string(argv[i]) == "--progress")  show_progress = true;
-        else if (std::string(argv[i]) == "--bench-ops") run_bench     = true;
-        else if (!input_file)                           input_file    = argv[i];
+        if      (std::string(argv[i]) == "--test")           run_tests      = true;
+        else if (std::string(argv[i]) == "--report")         show_report    = true;
+        else if (std::string(argv[i]) == "--progress")       show_progress  = true;
+        else if (std::string(argv[i]) == "--bench-ops")      run_bench      = true;
+        else if (std::string(argv[i]) == "--bench-ops-long") run_bench_long = true;
+        else if (!input_file)                                input_file     = argv[i];
     }
 
-    if (run_bench) {
-        run_bench_ops();
+    if (run_bench || run_bench_long) {
+        run_bench_ops(run_bench_long);
         return 0;
     }
 
     if (!input_file) {
-        fprintf(stderr, "Uso: %s [--test] [--report] [--progress] [--bench-ops] <candidatos.txt>\n", argv[0]);
+        fprintf(stderr, "Uso: %s [--test] [--report] [--progress] [--bench-ops] [--bench-ops-long] <candidatos.txt>\n", argv[0]);
         return 1;
     }
 

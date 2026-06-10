@@ -25,8 +25,8 @@ using dsec = std::chrono::duration<double>;
 
 static constexpr double BENCH_SECS = 3.0;
 static constexpr int N_BATCH = MR_BATCH_SIZE;
-static constexpr int BIT_SIZES[] = {128, 1024, 4096, 16384, 65536};
-static constexpr int N_SIZES = (int)(sizeof(BIT_SIZES) / sizeof(BIT_SIZES[0]));
+static constexpr int BIT_SIZES_SHORT[] = {128, 1024, 4096, 16384, 65536};
+static constexpr int BIT_SIZES_LONG[]  = {128, 1024, 4096, 16384, 65536, 131072, 262144};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -465,8 +465,12 @@ static BenchResult bench_gpu_mr(int n_bits, bool is_last)
 
 // ── run_bench_ops ─────────────────────────────────────────────────────────────
 
-void run_bench_ops()
+void run_bench_ops(bool long_run)
 {
+    const int* BIT_SIZES = long_run ? BIT_SIZES_LONG  : BIT_SIZES_SHORT;
+    const int  N_SIZES   = long_run ? (int)(sizeof(BIT_SIZES_LONG)  / sizeof(BIT_SIZES_LONG[0]))
+                                    : (int)(sizeof(BIT_SIZES_SHORT) / sizeof(BIT_SIZES_SHORT[0]));
+
     gmp_randinit_mt(rng_state);
     gmp_randseed_ui(rng_state, 0xDEADBEEF);
 
