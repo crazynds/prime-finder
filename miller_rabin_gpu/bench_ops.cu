@@ -175,6 +175,79 @@ static void free_nums(std::vector<__mpz_struct> &storage)
         mpz_clear(&m);
 }
 
+static BenchResult bench_gpu_mul_only(int n_bits, bool is_last)
+{
+    std::vector<__mpz_struct> storage;
+    std::vector<mpz_t *> nums;
+    make_nums(storage, nums, n_bits);
+
+    BenchResult res = {};
+    try {
+        BatchMontCtx ctx(nums, 0);
+        size_t nb = (size_t)N_BATCH * ctx.n_limbs * sizeof(Data64);
+        size_t nb_out = (size_t)N_BATCH * ctx.n_sum * sizeof(Data64);
+        Data64 *d_A, *d_B, *d_out;
+        cudaMalloc(&d_A, nb); cudaMalloc(&d_B, nb); cudaMalloc(&d_out, nb_out);
+        cudaMemcpy(d_A, ctx.d_one_mont, nb, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_B, ctx.d_Nm1_mont, nb, cudaMemcpyDeviceToDevice);
+        cudaDeviceSynchronize();
+
+        long long rounds = 0;
+        auto t0 = hrc::now();
+        double elapsed = 0;
+        do {
+            ctx.mul_no_redc_batch(d_A, d_B, d_out);
+            rounds++;
+            elapsed = dsec(hrc::now() - t0).count();
+        } while (elapsed < BENCH_SECS || (is_last && rounds < 1));
+
+        res = {(double)(rounds * N_BATCH) / elapsed, rounds * N_BATCH, elapsed};
+        cudaFree(d_A); cudaFree(d_B); cudaFree(d_out);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "  [GPU mul-only %d-bit] ERRO: %s\n", n_bits, e.what());
+        res.skipped = true;
+    }
+
+    free_nums(storage);
+    return res;
+}
+
+static BenchResult bench_gpu_sq_only(int n_bits, bool is_last)
+{
+    std::vector<__mpz_struct> storage;
+    std::vector<mpz_t *> nums;
+    make_nums(storage, nums, n_bits);
+
+    BenchResult res = {};
+    try {
+        BatchMontCtx ctx(nums, 0);
+        size_t nb = (size_t)N_BATCH * ctx.n_limbs * sizeof(Data64);
+        size_t nb_out = (size_t)N_BATCH * ctx.n_sum * sizeof(Data64);
+        Data64 *d_A, *d_out;
+        cudaMalloc(&d_A, nb); cudaMalloc(&d_out, nb_out);
+        cudaMemcpy(d_A, ctx.d_one_mont, nb, cudaMemcpyDeviceToDevice);
+        cudaDeviceSynchronize();
+
+        long long rounds = 0;
+        auto t0 = hrc::now();
+        double elapsed = 0;
+        do {
+            ctx.sq_no_redc_batch(d_A, d_out);
+            rounds++;
+            elapsed = dsec(hrc::now() - t0).count();
+        } while (elapsed < BENCH_SECS || (is_last && rounds < 1));
+
+        res = {(double)(rounds * N_BATCH) / elapsed, rounds * N_BATCH, elapsed};
+        cudaFree(d_A); cudaFree(d_out);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "  [GPU sq-only %d-bit] ERRO: %s\n", n_bits, e.what());
+        res.skipped = true;
+    }
+
+    free_nums(storage);
+    return res;
+}
+
 static BenchResult bench_gpu_mul(int n_bits, bool is_last)
 {
     std::vector<__mpz_struct> storage;
@@ -399,7 +472,11 @@ void run_bench_ops()
 
     // rows: 0=GPU mul, 1=GPU sq, 2=GPU MR,
     //       3=GMP mul, 4=GMP sq, 5=GMP mul+mod, 6=GMP sq+mod, 7=GMP MR
+    // rows: 0=GPU mul, 1=GPU sq, 2=GPU mul+mod, 3=GPU sq+mod, 4=GPU MR,
+    //       5=GMP mul, 6=GMP sq, 7=GMP mul+mod, 8=GMP sq+mod, 9=GMP MR
     const char *row_names[] = {
+        "GPU mul         (ops/s)",
+        "GPU sq          (ops/s)",
         "GPU mont_mul    (ops/s)",
         "GPU mont_sq     (ops/s)",
         "GPU miller-rabin(ops/s)",
@@ -409,11 +486,12 @@ void run_bench_ops()
         "GMP sq+mod      (ops/s)",
         "GMP miller-rabin(ops/s)",
     };
-    const int N_ROWS = 8;
+    const int N_ROWS = 10;
 
-    // speedup: GPU (mul+mod) vs GMP (mul+mod), GPU sq vs GMP sq+mod, GPU MR vs GMP MR
-    const int speedup_pairs[][2] = {{0, 5}, {1, 6}, {2, 7}};
+    const int speedup_pairs[][2] = {{0, 5}, {1, 6}, {2, 7}, {3, 8}, {4, 9}};
     const char *speedup_names[] = {
+        "Speedup GPU/GMP mul     ",
+        "Speedup GPU/GMP sq      ",
         "Speedup GPU/GMP mul+mod ",
         "Speedup GPU/GMP sq+mod  ",
         "Speedup GPU/GMP MR      ",
@@ -422,9 +500,9 @@ void run_bench_ops()
     BenchResult results[N_ROWS][N_SIZES] = {};
 
     printf("=== Benchmark Montgomery GPU vs GMP  (batch=%d, %.0fs/teste) ===\n"
-           "    GPU: mont_mul/sq = mul + reducao mod N (Montgomery)\n"
-           "    GMP: mul/sq = so multiplicacao  |  mul+mod/sq+mod = com reducao\n"
-           "    MR: 5 witnesses fixos {2,3,5,7,11}, N equiv 3 mod 4 (s=1)\n\n",
+           "    GPU mul/sq: NTT+pmul+INTT sem REDC  |  mont_mul/sq: com REDC\n"
+           "    GMP mul/sq: so multiplicacao         |  mul+mod/sq+mod: com reducao\n"
+           "    MR: 1 witness {2}, N equiv 3 mod 4 (s=1)\n\n",
            N_BATCH, BENCH_SECS);
 
     for (int c = 0; c < N_SIZES; c++)
@@ -433,45 +511,45 @@ void run_bench_ops()
         bool last = (c == N_SIZES - 1);
         printf("── %d bits ──\n", bits);
 
-        printf("  GPU mont_mul     ... ");
-        fflush(stdout);
-        results[0][c] = bench_gpu_mul(bits, last);
+        printf("  GPU mul          ... "); fflush(stdout);
+        results[0][c] = bench_gpu_mul_only(bits, last);
         printf("%.2fs\n", results[0][c].elapsed_sec);
 
-        printf("  GPU mont_sq      ... ");
-        fflush(stdout);
-        results[1][c] = bench_gpu_sq(bits, last);
+        printf("  GPU sq           ... "); fflush(stdout);
+        results[1][c] = bench_gpu_sq_only(bits, last);
         printf("%.2fs\n", results[1][c].elapsed_sec);
 
-        printf("  GPU miller-rabin ... ");
-        fflush(stdout);
-        results[2][c] = bench_gpu_mr(bits, last);
+        printf("  GPU mont_mul     ... "); fflush(stdout);
+        results[2][c] = bench_gpu_mul(bits, last);
         printf("%.2fs\n", results[2][c].elapsed_sec);
 
-        printf("  GMP mul          ... ");
-        fflush(stdout);
-        results[3][c] = bench_gmp_mul_only(bits, last);
+        printf("  GPU mont_sq      ... "); fflush(stdout);
+        results[3][c] = bench_gpu_sq(bits, last);
         printf("%.2fs\n", results[3][c].elapsed_sec);
 
-        printf("  GMP sq           ... ");
-        fflush(stdout);
-        results[4][c] = bench_gmp_sq_only(bits, last);
+        printf("  GPU miller-rabin ... "); fflush(stdout);
+        results[4][c] = bench_gpu_mr(bits, last);
         printf("%.2fs\n", results[4][c].elapsed_sec);
 
-        printf("  GMP mul+mod      ... ");
-        fflush(stdout);
-        results[5][c] = bench_gmp_mul(bits, last);
+        printf("  GMP mul          ... "); fflush(stdout);
+        results[5][c] = bench_gmp_mul_only(bits, last);
         printf("%.2fs\n", results[5][c].elapsed_sec);
 
-        printf("  GMP sq+mod       ... ");
-        fflush(stdout);
-        results[6][c] = bench_gmp_sq(bits, last);
+        printf("  GMP sq           ... "); fflush(stdout);
+        results[6][c] = bench_gmp_sq_only(bits, last);
         printf("%.2fs\n", results[6][c].elapsed_sec);
 
-        printf("  GMP miller-rabin ... ");
-        fflush(stdout);
-        results[7][c] = bench_gmp_mr(bits, last);
-        printf("%.2fs\n\n", results[7][c].elapsed_sec);
+        printf("  GMP mul+mod      ... "); fflush(stdout);
+        results[7][c] = bench_gmp_mul(bits, last);
+        printf("%.2fs\n", results[7][c].elapsed_sec);
+
+        printf("  GMP sq+mod       ... "); fflush(stdout);
+        results[8][c] = bench_gmp_sq(bits, last);
+        printf("%.2fs\n", results[8][c].elapsed_sec);
+
+        printf("  GMP miller-rabin ... "); fflush(stdout);
+        results[9][c] = bench_gmp_mr(bits, last);
+        printf("%.2fs\n\n", results[9][c].elapsed_sec);
     }
 
     // ── Tabela ────────────────────────────────────────────────────────────────
@@ -494,12 +572,12 @@ void run_bench_ops()
                    res.skipped ? "N/A" : fmt_ops(res.ops_per_sec).c_str());
         }
         printf("\n");
-        if (r == 2)
+        if (r == 4)
             printf("\n"); // separador entre GPU e GMP
     }
 
     printf("%s\n", std::string(ROW_W + N_SIZES * COL_W, '-').c_str());
-    for (int p = 0; p < 3; p++)
+    for (int p = 0; p < 5; p++)
     {
         int gi = speedup_pairs[p][0], mi = speedup_pairs[p][1];
         printf("%-*s", ROW_W, speedup_names[p]);

@@ -127,6 +127,12 @@ struct BatchMontCtx {
     // d_out = mont_sq(d_A) para todos os n_batch candidatos
     void mont_sq_batch(const Data64* d_A, Data64* d_out, cudaStream_t s = 0);
 
+    // Apenas NTT(A)*NTT(B) + INTT — sem REDC. Mede custo puro da multiplicação.
+    void mul_no_redc_batch(const Data64* d_A, const Data64* d_B, Data64* d_out,
+                           cudaStream_t s = 0);
+    // Apenas NTT(A)^2 + INTT — sem REDC.
+    void sq_no_redc_batch(const Data64* d_A, Data64* d_out, cudaStream_t s = 0);
+
     BatchMontCtx(const BatchMontCtx&) = delete;
     BatchMontCtx& operator=(const BatchMontCtx&) = delete;
 

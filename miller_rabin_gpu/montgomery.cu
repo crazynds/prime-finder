@@ -607,3 +607,23 @@ void BatchMontCtx::mont_sq_batch(const Data64* d_A, Data64* d_out, cudaStream_t 
     TSTOP(perf.cond_sub_ms);
     perf_flush(s);  // único sync por chamada
 }
+
+// Apenas NTT(A)*NTT(B) + INTT + carry — sem REDC nem cond_sub.
+// Usado para benchmark de mul pura, sem redução modular.
+void BatchMontCtx::mul_no_redc_batch(const Data64* d_A, const Data64* d_B,
+                                      Data64* d_out, cudaStream_t s)
+{
+    ntt.ntt_AB(d_A, d_B, n_limbs, s);
+    ntt.pmul_and_intt(s);
+    ntt.carry_to_limbs(d_out, n_sum, CARRY_PASSES_MUL, s);
+    cudaStreamSynchronize(s);
+}
+
+// Apenas NTT(A)^2 + INTT + carry — sem REDC nem cond_sub.
+void BatchMontCtx::sq_no_redc_batch(const Data64* d_A, Data64* d_out, cudaStream_t s)
+{
+    ntt.ntt_A(d_A, n_limbs, s);
+    ntt.psq_and_intt(s);
+    ntt.carry_to_limbs(d_out, n_sum, CARRY_PASSES_MUL, s);
+    cudaStreamSynchronize(s);
+}

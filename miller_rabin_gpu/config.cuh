@@ -9,7 +9,7 @@
 #define MR_WINDOW_BITS 8
 
 // Candidatos por chamada GPU. Quanto maior, mais VRAM usada.
-#define MR_BATCH_SIZE 32
+#define MR_BATCH_SIZE 256
 
 /** --------------------------------------------------
                     Threads por bloco
