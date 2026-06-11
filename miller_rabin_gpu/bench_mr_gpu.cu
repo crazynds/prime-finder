@@ -71,6 +71,7 @@ int main(int argc, char* argv[])
     bool show_progress  = false;
     bool run_bench      = false;
     bool run_bench_long = false;
+    bool show_config    = false;
     const char* input_file = nullptr;
 
     for (int i = 1; i < argc; i++) {
@@ -79,7 +80,44 @@ int main(int argc, char* argv[])
         else if (std::string(argv[i]) == "--progress")       show_progress  = true;
         else if (std::string(argv[i]) == "--bench-ops")      run_bench      = true;
         else if (std::string(argv[i]) == "--bench-ops-long") run_bench_long = true;
+        else if (std::string(argv[i]) == "--config")         show_config    = true;
         else if (!input_file)                                input_file     = argv[i];
+    }
+
+    if (show_config) {
+#if   CARRY_NORM_ALG == CARRY_ALG_SINGLE_TILE
+        const char* carry_alg = "SINGLE_TILE";
+#elif CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE
+        const char* carry_alg = "MULTI_TILE";
+#else
+        const char* carry_alg = "SEQUENTIAL";
+#endif
+#if   MONT_MUL_ALG == MONT_MUL_ALG_NTT
+        const char* mul_alg = "NTT";
+#else
+        const char* mul_alg = "SCHOOLBOOK";
+#endif
+        printf("╔══════════════════════════════════════════════════╗\n");
+        printf("║  Configuração de build                           ║\n");
+        printf("╚══════════════════════════════════════════════════╝\n");
+        printf("  window_bits       %d\n",   MR_WINDOW_BITS);
+        printf("  batch_size        %d\n",   MR_BATCH_SIZE);
+        printf("  mont_mul_alg      %s\n",   mul_alg);
+        printf("  carry_norm_alg    %s\n",   carry_alg);
+        printf("  carry_tile        %d\n",   MR_CARRY_TILE);
+        printf("  thr_load          %d\n",   MR_THR_LOAD);
+        printf("  thr_pmul          %d\n",   MR_THR_PMUL);
+        printf("  thr_reduce        %d\n",   MR_THR_REDUCE);
+        printf("  thr_select_win    %d\n",   MR_THR_SELECT_WIN);
+        printf("  thr_check         %d\n",   MR_THR_CHECK);
+        printf("  cs_tile           %d\n",   MR_CS_TILE);
+        printf("  progress_interval %d ms\n", MR_PROGRESS_INTERVAL_MS);
+#ifdef MR_ADVANCED_MONITOR
+        printf("  advanced_monitor  ON\n");
+#else
+        printf("  advanced_monitor  OFF\n");
+#endif
+        printf("\n");
     }
 
     if (run_bench || run_bench_long) {
@@ -88,7 +126,7 @@ int main(int argc, char* argv[])
     }
 
     if (!input_file) {
-        fprintf(stderr, "Uso: %s [--test] [--report] [--progress] [--bench-ops] [--bench-ops-long] <candidatos.txt>\n", argv[0]);
+        fprintf(stderr, "Uso: %s [--test] [--report] [--progress] [--config] [--bench-ops] [--bench-ops-long] <candidatos.txt>\n", argv[0]);
         return 1;
     }
 

@@ -70,6 +70,9 @@
 // Intervalo mínimo entre atualizações da barra de progresso (ms).
 #define MR_PROGRESS_INTERVAL_MS @MR_PROGRESS_INTERVAL_MS@
 
+// Monitor avançado: imprime estatísticas de iterações do carry (causa overhead).
+#cmakedefine MR_ADVANCED_MONITOR
+
 /** --------------------------------------------------
       Algoritmo de multiplicação big-integer
       (mont_mul_batch / mont_sq_batch)

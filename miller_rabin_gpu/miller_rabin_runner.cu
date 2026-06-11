@@ -1,5 +1,6 @@
 // miller_rabin_runner.cu
 #include "miller_rabin_runner.cuh"
+#include "bigint_ntt.cuh"
 #include <cstdio>
 #include <chrono>
 #include <algorithm>
@@ -225,6 +226,7 @@ static void print_perf(const PerfCtrs& perf, BatchMontCtx& mont)
     printf("  TOTAL                   %8.2fs\n\n", total_ms/1000.0);
     printf("  Breakdown interno (mont_sq + mont_mul acumulado):\n");
     mont.perf.print();
+    carry_stats_print_and_reset();
 }
 
 // ── Aloca buffers de trabalho para os witnesses ───────────────────────────────

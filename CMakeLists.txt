@@ -127,10 +127,14 @@ add_test(NAME gpu_tests  COMMAND prime_tests --test)
 # ── Miller-Rabin GPU (bench_mr_gpu) ───────────────────────────────────────────
 
 # Gera config.h a partir do template + params.cmake
+if(MR_ADVANCED_MONITOR)
+    set(MR_ADVANCED_MONITOR 1)
+else()
+    unset(MR_ADVANCED_MONITOR)
+endif()
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/miller_rabin_gpu/config.h.in
     ${CMAKE_CURRENT_SOURCE_DIR}/miller_rabin_gpu/config.h
-    @ONLY
 )
 
 include(FetchContent)

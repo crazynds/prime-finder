@@ -509,19 +509,25 @@ void BatchMontCtx::check_passed(const Data64 *d_r_mont, uint8_t *d_passed,
 
 // Grava o marco de início da seção no ring (sem sync).
 // No-op quando perf_enabled == false.
-#define TSTART() \
-    do { if (perf_enabled) CU(cudaEventRecord(ev_ring[ring_cur], s)); } while (0)
+#define TSTART()                                       \
+    do                                                 \
+    {                                                  \
+        if (perf_enabled)                              \
+            CU(cudaEventRecord(ev_ring[ring_cur], s)); \
+    } while (0)
 
 // Grava o marco de fim, registra o acumulador — sem sync.
 // perf_flush() no final da função pública sincroniza uma única vez.
 // No-op quando perf_enabled == false.
-#define TSTOP(acc)                                          \
-    do {                                                    \
-        if (perf_enabled) {                                 \
-            CU(cudaEventRecord(ev_ring[ring_cur + 1], s));  \
-            acc_ring[ring_cur] = &(acc);                    \
-            ring_cur++;                                     \
-        }                                                   \
+#define TSTOP(acc)                                         \
+    do                                                     \
+    {                                                      \
+        if (perf_enabled)                                  \
+        {                                                  \
+            CU(cudaEventRecord(ev_ring[ring_cur + 1], s)); \
+            acc_ring[ring_cur] = &(acc);                   \
+            ring_cur++;                                    \
+        }                                                  \
     } while (0)
 
 // Redução Montgomery: dado T = A*B (ou A²) em d_T [n_batch * n_sum],
@@ -564,7 +570,7 @@ void BatchMontCtx::reduce_batch(Data64 *d_out, cudaStream_t s)
     // Passo 3: normaliza m — propaga carries nos coeficientes brutos do INTT.
     //   Resultado normalizado (limbs de 16 bits) vai para d_m [n_batch * n_limbs].
     TSTART();
-    ntt.carry_to_limbs(d_m, n_limbs, CARRY_PASSES_MUL, s);
+    ntt.carry_to_limbs(d_m, n_limbs, s);
     TSTOP(perf.red_carry_m_ms);
 
     // Passo 4: mN = m * N
@@ -586,14 +592,14 @@ void BatchMontCtx::reduce_batch(Data64 *d_out, cudaStream_t s)
     //   fica em d_T [n_batch * n_sum] pronto para o shift.
 #if CARRY_NORM_ALG == CARRY_ALG_SEQUENTIAL
     TSTART();
-    ntt.add_raw_buf_and_carry(d_T, n_sum, CARRY_PASSES_ADD, s);
+    ntt.add_raw_buf_and_carry(d_T, n_sum, s);
     TSTOP(perf.red_add_carry_ms);
 #else
     TSTART();
     ntt.vadd_raw_buf(d_T, n_sum, s);
     TSTOP(perf.red_vadd_ms);
     TSTART();
-    ntt.carry_after_vadd(d_T, n_sum, CARRY_PASSES_ADD, s);
+    ntt.carry_after_vadd(d_T, n_sum, s);
     TSTOP(perf.red_add_carry_ms);
 #endif
 
@@ -648,7 +654,7 @@ void BatchMontCtx::mont_mul_batch(const Data64 *d_A, const Data64 *d_B, Data64 *
     // Passo 3: normaliza T — propaga carries dos coeficientes brutos do INTT.
     //   Resultado vai para d_T [n_batch * n_sum] com limbs de 16 bits.
     TSTART();
-    ntt.carry_to_limbs(d_T, n_sum, CARRY_PASSES_MUL, s);
+    ntt.carry_to_limbs(d_T, n_sum, s);
     TSTOP(perf.carry_product_ms);
 
     // Passo 4: redução Montgomery — out = T * R^{-1} mod N.
@@ -690,7 +696,7 @@ void BatchMontCtx::mont_sq_batch(const Data64 *d_A, Data64 *d_out, cudaStream_t 
     // Passo 3: normaliza T — propaga carries dos coeficientes brutos do INTT.
     //   Resultado vai para d_T [n_batch * n_sum] com limbs de 16 bits.
     TSTART();
-    ntt.carry_to_limbs(d_T, n_sum, CARRY_PASSES_MUL, s);
+    ntt.carry_to_limbs(d_T, n_sum, s);
     TSTOP(perf.carry_product_ms);
 
     // Passo 4: redução Montgomery — out = T * R^{-1} mod N.
@@ -711,7 +717,7 @@ void BatchMontCtx::mul_no_redc_batch(const Data64 *d_A, const Data64 *d_B,
 {
     ntt.ntt_AB(d_A, d_B, n_limbs, s);
     ntt.pmul_and_intt(s);
-    ntt.carry_to_limbs(d_out, n_sum, CARRY_PASSES_MUL, s);
+    ntt.carry_to_limbs(d_out, n_sum, s);
     cudaStreamSynchronize(s);
 }
 
@@ -720,6 +726,6 @@ void BatchMontCtx::sq_no_redc_batch(const Data64 *d_A, Data64 *d_out, cudaStream
 {
     ntt.ntt_A(d_A, n_limbs, s);
     ntt.psq_and_intt(s);
-    ntt.carry_to_limbs(d_out, n_sum, CARRY_PASSES_MUL, s);
+    ntt.carry_to_limbs(d_out, n_sum, s);
     cudaStreamSynchronize(s);
 }

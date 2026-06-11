@@ -100,7 +100,7 @@ struct BatchMontCtx
             row("red:pmul_N", red_pmul_n_ms);
             row("red:intt_N", red_intt_n_ms);
             row("red:vadd", red_vadd_ms);
-            row("red:carry_T", red_add_carry_ms);
+            row("red:add_carry", red_add_carry_ms);
             row("red:shift_right", red_shift_ms);
             row("cond_sub", cond_sub_ms);
             printf("  └─ %-22s %8.3fs\n", "TOTAL", total / 1000.0f);

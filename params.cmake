@@ -17,16 +17,20 @@ set(MR_THR_CHECK       256)
 set(MR_CARRY_INTER_THR  32)
 
 # Algoritmo de carry: CARRY_ALG_SEQUENTIAL | CARRY_ALG_SINGLE_TILE | CARRY_ALG_MULTI_TILE
-set(CARRY_NORM_ALG CARRY_ALG_MULTI_TILE)
+set(CARRY_NORM_ALG CARRY_ALG_SINGLE_TILE)
 
 # Tamanho do tile de carry (threads por bloco, usado pelos algoritmos TILE)
-set(MR_CARRY_TILE 256)
+set(MR_CARRY_TILE 32)
 
 # Tile da subtração condicional
 set(MR_CS_TILE 256)
 
 # Intervalo mínimo entre updates da barra de progresso (ms)
 set(MR_PROGRESS_INTERVAL_MS 2000)
+
+# Monitor avançado: imprime estatísticas de iterações do carry (causa overhead)
+# ON | OFF
+set(MR_ADVANCED_MONITOR ON)
 
 # Algoritmo de multiplicação big-integer: MONT_MUL_ALG_NTT | MONT_MUL_ALG_SCHOOLBOOK
 set(MONT_MUL_ALG MONT_MUL_ALG_NTT)
