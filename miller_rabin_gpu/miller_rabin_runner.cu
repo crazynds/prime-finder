@@ -284,6 +284,8 @@ std::vector<bool> gpu_miller_rabin_s1(
     std::vector<bool>    alive(n_total, true);
     PerfCtrs perf;
 
+    mont.perf_enabled = show_report;
+
     cudaEvent_t ev0, ev1;
     CU(cudaEventCreate(&ev0)); CU(cudaEventCreate(&ev1));
     auto elapsed_ms = [&]() { float ms=0; CU(cudaEventSynchronize(ev1)); CU(cudaEventElapsedTime(&ms,ev0,ev1)); return ms; };
@@ -365,6 +367,8 @@ std::vector<bool> gpu_miller_rabin(
     int n = mont.n_limbs;
     size_t total_bytes = (size_t)n_total * n * sizeof(Data64);
     WitnessBuffers buf(mont, exp_all, n_total);
+
+    mont.perf_enabled = show_report;
 
     // d_alive[t]: 0=desconhecido, 1=ainda vivo no round atual, 2=passou (primo provável)
     uint8_t* d_alive;

@@ -29,14 +29,16 @@ __global__ static void pmul_batch(Data64 *__restrict__ a, const Data64 *__restri
                                   int total, Data64 p)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
+    if (i >= total)
+        return;
     a[i] = (Data64)((__uint128_t)a[i] * b[i] % (__uint128_t)p);
 }
 
 __global__ static void psq_batch(Data64 *__restrict__ a, int total, Data64 p)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
+    if (i >= total)
+        return;
     a[i] = (Data64)((__uint128_t)a[i] * a[i] % (__uint128_t)p);
 }
 
@@ -53,6 +55,7 @@ __global__ static void vadd_batch(
     d_c[cand * n + j] = d_a[cand * n + j] + d_b[cand * n + j];
 }
 
+#if CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE || CARRY_NORM_ALG == CARRY_ALG_SINGLE_TILE
 // Soma d_buf_A (stride=padded, raw INTT) em d_dst (stride=n_dst) element-wise.
 __global__ static void vadd_from_raw_batch(
     Data64 *__restrict__ d_dst,
@@ -66,6 +69,7 @@ __global__ static void vadd_from_raw_batch(
     if (j < padded)
         d_dst[cand * n_dst + j] += d_raw[cand * padded + j];
 }
+#endif
 
 // ── Algoritmos de carry normalização ─────────────────────────────────────────
 //
@@ -295,7 +299,6 @@ BigIntNTTBatch::BigIntNTTBatch(int n_limbs_, int n_batch_)
 
     CU(cudaMemcpy(d_fwd_table, fwd_h.data(), tbytes, cudaMemcpyHostToDevice));
     CU(cudaMemcpy(d_inv_table, inv_h.data(), tbytes, cudaMemcpyHostToDevice));
-
 }
 
 BigIntNTTBatch::~BigIntNTTBatch()
@@ -311,7 +314,7 @@ ntt_configuration<Data64> BigIntNTTBatch::make_cfg(type t, cudaStream_t s)
     return {
         .n_power = logn,
         .ntt_type = t,
-        .ntt_layout = PerPolynomial,
+        .ntt_layout = (logn >= 10) ? PerPolynomial : GPUNTT_NTT_LAYOUT,
         .reduction_poly = ReductionPolynomial::X_N_minus,
         .zero_padding = false,
         .mod_inverse = n_inv,
@@ -352,31 +355,51 @@ void BigIntNTTBatch::fwd_A(cudaStream_t s)
     GPU_NTT_Inplace(d_buf_A, d_fwd_table, modulus, make_cfg(FORWARD, s), n_batch);
 }
 
-void BigIntNTTBatch::pmul_and_intt(cudaStream_t s)
+void BigIntNTTBatch::pmul(cudaStream_t s)
 {
     int total = n_batch * padded;
     constexpr int thr = MR_THR_PMUL;
     const int blk = (total + thr - 1) / thr;
     pmul_batch<<<blk, thr, 0, s>>>(d_buf_A, d_buf_B, total, p_val);
-    GPU_INTT_Inplace(d_buf_A, d_inv_table, modulus, make_cfg(INVERSE, s), n_batch);
 }
 
-void BigIntNTTBatch::pmul_ext_and_intt(const Data64 *d_ext, cudaStream_t s)
-{
-    int total = n_batch * padded;
-    constexpr int thr = MR_THR_PMUL;
-    const int blk = (total + thr - 1) / thr;
-    pmul_batch<<<blk, thr, 0, s>>>(d_buf_A, d_ext, total, p_val);
-    GPU_INTT_Inplace(d_buf_A, d_inv_table, modulus, make_cfg(INVERSE, s), n_batch);
-}
-
-void BigIntNTTBatch::psq_and_intt(cudaStream_t s)
+void BigIntNTTBatch::psq(cudaStream_t s)
 {
     int total = n_batch * padded;
     constexpr int thr = MR_THR_PMUL;
     const int blk = (total + thr - 1) / thr;
     psq_batch<<<blk, thr, 0, s>>>(d_buf_A, total, p_val);
+}
+
+void BigIntNTTBatch::pmul_ext(const Data64 *d_ext, cudaStream_t s)
+{
+    int total = n_batch * padded;
+    constexpr int thr = MR_THR_PMUL;
+    const int blk = (total + thr - 1) / thr;
+    pmul_batch<<<blk, thr, 0, s>>>(d_buf_A, d_ext, total, p_val);
+}
+
+void BigIntNTTBatch::intt_A(cudaStream_t s)
+{
     GPU_INTT_Inplace(d_buf_A, d_inv_table, modulus, make_cfg(INVERSE, s), n_batch);
+}
+
+void BigIntNTTBatch::pmul_and_intt(cudaStream_t s)
+{
+    pmul(s);
+    intt_A(s);
+}
+
+void BigIntNTTBatch::pmul_ext_and_intt(const Data64 *d_ext, cudaStream_t s)
+{
+    pmul_ext(d_ext, s);
+    intt_A(s);
+}
+
+void BigIntNTTBatch::psq_and_intt(cudaStream_t s)
+{
+    psq(s);
+    intt_A(s);
 }
 
 void BigIntNTTBatch::carry_to_limbs(Data64 *d_out, int n_out, int n_passes, cudaStream_t s)
@@ -399,29 +422,44 @@ void BigIntNTTBatch::carry_to_limbs(Data64 *d_out, int n_out, int n_passes, cuda
 #endif
 }
 
-void BigIntNTTBatch::add_raw_buf_and_carry(Data64 *d_dst, int n_dst, int n_passes,
-                                           cudaStream_t s)
+void BigIntNTTBatch::vadd_raw_buf(Data64 *d_dst, int n_dst, cudaStream_t s)
 {
 #if CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE
-    constexpr int THR = MR_CARRY_INTER_THR;
     int n_tiles = (n_dst + CARRY_TILE - 1) / CARRY_TILE;
-    int inter_blk = (n_batch + THR - 1) / THR;
     vadd_from_raw_batch<<<dim3(n_tiles, n_batch), CARRY_TILE, 0, s>>>(
         d_dst, d_buf_A, n_dst, padded, n_batch);
-    carry_intra_copy<<<dim3(n_tiles, n_batch), CARRY_TILE, 0, s>>>(
-        d_dst, d_dst, d_tile_carry, n_dst, n_dst, n_batch, n_passes);
-    carry_inter_tiles<<<inter_blk, THR, 0, s>>>(
-        d_dst, d_tile_carry, n_dst, n_batch);
-
 #elif CARRY_NORM_ALG == CARRY_ALG_SINGLE_TILE
     constexpr int THR = MR_THR_REDUCE;
     unsigned bp = (unsigned)(n_dst + THR - 1) / THR;
     vadd_from_raw_batch<<<dim3(bp, (unsigned)n_batch), THR, 0, s>>>(
         d_dst, d_buf_A, n_dst, padded, n_batch);
-    carry_16bits<<<n_batch, CARRY_TILE, 0, s>>>(d_dst, d_dst, n_dst, n_dst, n_batch);
+#endif
+    // SEQUENTIAL: não tem vadd separado — usar add_raw_buf_and_carry diretamente
+}
 
+void BigIntNTTBatch::carry_after_vadd(Data64 *d_dst, int n_dst, int n_passes, cudaStream_t s)
+{
+#if CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE
+    constexpr int THR = MR_CARRY_INTER_THR;
+    int n_tiles = (n_dst + CARRY_TILE - 1) / CARRY_TILE;
+    int inter_blk = (n_batch + THR - 1) / THR;
+    carry_intra_copy<<<dim3(n_tiles, n_batch), CARRY_TILE, 0, s>>>(
+        d_dst, d_dst, d_tile_carry, n_dst, n_dst, n_batch, n_passes);
+    carry_inter_tiles<<<inter_blk, THR, 0, s>>>(
+        d_dst, d_tile_carry, n_dst, n_batch);
+#elif CARRY_NORM_ALG == CARRY_ALG_SINGLE_TILE
+    carry_16bits<<<n_batch, CARRY_TILE, 0, s>>>(d_dst, d_dst, n_dst, n_dst, n_batch);
+#endif
+    // SEQUENTIAL: no-op — carry já foi feito em add_raw_buf_and_carry
+}
+
+void BigIntNTTBatch::add_raw_buf_and_carry(Data64 *d_dst, int n_dst, int n_passes,
+                                           cudaStream_t s)
+{
+#if CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE || CARRY_NORM_ALG == CARRY_ALG_SINGLE_TILE
+    vadd_raw_buf(d_dst, n_dst, s);
+    carry_after_vadd(d_dst, n_dst, n_passes, s);
 #elif CARRY_NORM_ALG == CARRY_ALG_SEQUENTIAL
-    // Fundido: soma e normaliza em uma única passagem por candidato
     int blk = (n_batch + 31) / 32;
     vadd_carry_sequential<<<blk, 32, 0, s>>>(d_dst, d_buf_A, n_dst, padded, n_batch);
 #endif
@@ -444,16 +482,21 @@ __global__ static void schoolbook_mul_kernel(
     int n_limbs, int padded, int n_batch)
 {
     int cand = blockIdx.y;
-    int j    = blockIdx.x * blockDim.x + threadIdx.x;
-    if (cand >= n_batch || j >= padded) return;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cand >= n_batch || j >= padded)
+        return;
 
-    if (j >= 2 * n_limbs) { d_buf_A[(size_t)cand * padded + j] = 0ULL; return; }
+    if (j >= 2 * n_limbs)
+    {
+        d_buf_A[(size_t)cand * padded + j] = 0ULL;
+        return;
+    }
 
     const Data64 *A = d_A + (size_t)cand * n_limbs;
     const Data64 *B = d_B + (size_t)cand * n_limbs;
     uint64_t acc = 0;
     int i_lo = (j >= n_limbs) ? j - n_limbs + 1 : 0;
-    int i_hi = (j < n_limbs)  ? j + 1           : n_limbs;
+    int i_hi = (j < n_limbs) ? j + 1 : n_limbs;
     for (int i = i_lo; i < i_hi; i++)
         acc += A[i] * B[j - i];
     d_buf_A[(size_t)cand * padded + j] = acc;
@@ -467,21 +510,27 @@ __global__ static void schoolbook_sq_kernel(
     int n_limbs, int padded, int n_batch)
 {
     int cand = blockIdx.y;
-    int j    = blockIdx.x * blockDim.x + threadIdx.x;
-    if (cand >= n_batch || j >= padded) return;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cand >= n_batch || j >= padded)
+        return;
 
-    if (j >= 2 * n_limbs) { d_buf_A[(size_t)cand * padded + j] = 0ULL; return; }
+    if (j >= 2 * n_limbs)
+    {
+        d_buf_A[(size_t)cand * padded + j] = 0ULL;
+        return;
+    }
 
     const Data64 *A = d_A + (size_t)cand * n_limbs;
     uint64_t acc = 0;
-    int i_lo      = (j >= n_limbs) ? j - n_limbs + 1 : 0;
-    int i_hi_excl = (j < n_limbs)  ? j + 1           : n_limbs;
+    int i_lo = (j >= n_limbs) ? j - n_limbs + 1 : 0;
+    int i_hi_excl = (j < n_limbs) ? j + 1 : n_limbs;
     // Pares (i, j-i) com i < j-i  →  contribuem 2*A[i]*A[j-i]
-    int i_cross = (j + 1) / 2;  // primeiro i onde 2*i >= j
+    int i_cross = (j + 1) / 2; // primeiro i onde 2*i >= j
     for (int i = i_lo; i < i_cross && i < i_hi_excl; i++)
         acc += 2ULL * A[i] * A[j - i];
     // Termo do meio (j par, i == j/2)
-    if (j % 2 == 0) {
+    if (j % 2 == 0)
+    {
         int m = j / 2;
         if (m >= i_lo && m < i_hi_excl)
             acc += A[m] * A[m];

@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 
+# ── Parâmetros do usuário ─────────────────────────────────────────────────────
+include(${CMAKE_CURRENT_SOURCE_DIR}/params.cmake)
+
 # CUDA 11.x supports GCC <= 11. If the system default is newer, try gcc-11.
 find_program(GCC11 gcc-11)
 if(GCC11)
@@ -123,11 +126,22 @@ add_test(NAME gpu_tests  COMMAND prime_tests --test)
 
 # ── Miller-Rabin GPU (bench_mr_gpu) ───────────────────────────────────────────
 
+# Gera config.h a partir do template + params.cmake
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/miller_rabin_gpu/config.h.in
+    ${CMAKE_CURRENT_SOURCE_DIR}/miller_rabin_gpu/config.h
+    @ONLY
+)
+
 include(FetchContent)
 FetchContent_Declare(
     GPUNTT
     GIT_REPOSITORY https://github.com/Alisah-Ozcan/GPU-NTT.git
     GIT_TAG        main
+    PATCH_COMMAND  git apply --ignore-whitespace
+                   ${CMAKE_CURRENT_SOURCE_DIR}/patches/gpuntt_remove_cc89.patch
+                   || true
+    UPDATE_DISCONNECTED TRUE
 )
 set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/gpuntt_install" CACHE PATH "" FORCE)
 FetchContent_MakeAvailable(GPUNTT)
@@ -155,6 +169,14 @@ target_link_libraries(bench_mr_gpu PRIVATE
     GPUNTT::ntt
     CUDA::cudart
     ${GMP_LIB}
+)
+
+# Repassa flags GPU-NTT de params.cmake para o compilador
+if(GPUNTT_CC89)
+    target_compile_definitions(bench_mr_gpu PRIVATE CC_89)
+endif()
+target_compile_definitions(bench_mr_gpu PRIVATE
+    GPUNTT_NTT_LAYOUT=${GPUNTT_NTT_LAYOUT}
 )
 
 

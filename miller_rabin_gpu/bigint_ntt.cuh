@@ -60,14 +60,21 @@ struct BigIntNTTBatch {
     // Carrega d_srcA em buf_A e d_srcB em buf_B, depois NTT em batch (2*n_batch de uma vez)
     void ntt_AB(const Data64* d_srcA, const Data64* d_srcB, int n_src, cudaStream_t s = 0);
 
-    // d_buf_A = d_buf_A * d_buf_B (pointwise), INTT -> d_buf_A
-    void pmul_and_intt(cudaStream_t s = 0);
-    // d_buf_A = d_buf_A^2 (pointwise), INTT -> d_buf_A
-    void psq_and_intt(cudaStream_t s = 0);
-    // d_buf_A = d_buf_A * d_ext (externo, ja em dominio NTT [n_batch*padded]), INTT -> d_buf_A
-    void pmul_ext_and_intt(const Data64* d_ext, cudaStream_t s = 0);
+    // d_buf_A = d_buf_A * d_buf_B (pointwise)
+    void pmul(cudaStream_t s = 0);
+    // d_buf_A = d_buf_A^2 (pointwise)
+    void psq(cudaStream_t s = 0);
+    // d_buf_A = d_buf_A * d_ext (externo, ja em dominio NTT [n_batch*padded])
+    void pmul_ext(const Data64* d_ext, cudaStream_t s = 0);
+    // INTT -> d_buf_A
+    void intt_A(cudaStream_t s = 0);
     // Apenas NTT forward em d_buf_A (ja preenchido externamente com zero-pad)
     void fwd_A(cudaStream_t s = 0);
+
+    // Compostos mantidos por compatibilidade
+    void pmul_and_intt(cudaStream_t s = 0);
+    void psq_and_intt(cudaStream_t s = 0);
+    void pmul_ext_and_intt(const Data64* d_ext, cudaStream_t s = 0);
 
     // Convolução polinomial direta O(n²) — escreve em d_buf_A (stride=padded).
     // Alternativa ao par ntt_AB + pmul_and_intt. Só prático para n_limbs pequeno.
@@ -81,8 +88,13 @@ struct BigIntNTTBatch {
     // d_a += d_b (ambos [n_batch * n]), depois normaliza carries
     void add_and_carry(Data64* d_a, const Data64* d_b, int n, int n_passes,
                        cudaStream_t s = 0);
-    // d_dst += d_buf_A (bruto, stride=padded) e normaliza carries em uma passagem.
-    // Equivale a carry_to_limbs(tmp) + add_and_carry(d_dst, tmp), sem buffer intermediário.
+    // d_dst += d_buf_A (bruto, stride=padded), sem normalizar carries.
+    // Não disponível em CARRY_ALG_SEQUENTIAL (fundido com o carry).
+    void vadd_raw_buf(Data64* d_dst, int n_dst, cudaStream_t s = 0);
+    // Normaliza carries em d_dst após vadd_raw_buf.
+    // Em CARRY_ALG_SEQUENTIAL é no-op (o carry já foi feito em add_raw_buf_and_carry).
+    void carry_after_vadd(Data64* d_dst, int n_dst, int n_passes, cudaStream_t s = 0);
+    // Versão composta: vadd + carry em uma chamada.
     void add_raw_buf_and_carry(Data64* d_dst, int n_dst, int n_passes,
                                cudaStream_t s = 0);
 

@@ -46,22 +46,29 @@ struct BatchMontCtx
         // NTT: mul: load_padded(A+B)+NTT(A+B) | sq: load_padded(A)+NTT(A)
         // Schoolbook: schoolbook_mul / schoolbook_sq
         float ntt_input_ms = 0;
-        // NTT: mul: pmul_batch+INTT | sq: psq_batch+INTT
-        // Schoolbook: não utilizado (0)
-        float ntt_product_ms = 0;
+        // NTT: mul: pmul_batch | sq: psq_batch
+        float pmul_ms = 0;
+        // NTT: INTT após pmul/psq
+        float intt_product_ms = 0;
         // carry_intra + carry_inter sobre T (resultado do produto/quadrado)
         float carry_product_ms = 0;
         // reduce: extract_low(T) + fwd_A — prepara T_low para multiplicar por N'
         float red_ntt_tlow_ms = 0;
-        // reduce: pmul_ext(N') + INTT — m = T_low * N' no domínio NTT
+        // reduce: pmul_ext(N') — multiplicação pontual T_low * N'
         float red_pmul_np_ms = 0;
+        // reduce: INTT após pmul(N')
+        float red_intt_np_ms = 0;
         // reduce: carry_intra + carry_inter sobre m
         float red_carry_m_ms = 0;
         // reduce: load_padded(m) + NTT(m) — transforma m para multiplicar por N
         float red_ntt_m_ms = 0;
-        // reduce: pmul_ext(N) + INTT — mN = m * N no domínio NTT
+        // reduce: pmul_ext(N) — multiplicação pontual m * N
         float red_pmul_n_ms = 0;
-        // reduce: vadd_from_raw + carry_intra + carry_inter — T += mN, normaliza
+        // reduce: INTT após pmul(N)
+        float red_intt_n_ms = 0;
+        // reduce: vadd_from_raw — T += mN (soma antes do carry)
+        float red_vadd_ms = 0;
+        // reduce: carry_intra + carry_inter sobre T após vadd
         float red_add_carry_ms = 0;
         // reduce: shift_right(T, n_limbs) — resultado final = T[n_limbs..]
         float red_shift_ms = 0;
@@ -70,7 +77,7 @@ struct BatchMontCtx
 
         void print() const
         {
-            float total = ntt_input_ms + ntt_product_ms + carry_product_ms + red_ntt_tlow_ms + red_pmul_np_ms + red_carry_m_ms + red_ntt_m_ms + red_pmul_n_ms + red_add_carry_ms + red_shift_ms + cond_sub_ms;
+            float total = ntt_input_ms + pmul_ms + intt_product_ms + carry_product_ms + red_ntt_tlow_ms + red_pmul_np_ms + red_intt_np_ms + red_carry_m_ms + red_ntt_m_ms + red_pmul_n_ms + red_intt_n_ms + red_vadd_ms + red_add_carry_ms + red_shift_ms + cond_sub_ms;
             auto pct = [&](float v)
             { return total > 0 ? v * 100.0f / total : 0.0f; };
             auto row = [&](const char *name, float ms)
@@ -81,25 +88,32 @@ struct BatchMontCtx
             row("schoolbook_mul/sq", ntt_input_ms);
 #else
             row("ntt_input", ntt_input_ms);
-            row("ntt_product", ntt_product_ms);
+            row("pmul/psq", pmul_ms);
+            row("intt_product", intt_product_ms);
 #endif
             row("carry_product", carry_product_ms);
             row("red:ntt_Tlow", red_ntt_tlow_ms);
-            row("red:pmul_Np+INTT", red_pmul_np_ms);
+            row("red:pmul_Np", red_pmul_np_ms);
+            row("red:intt_Np", red_intt_np_ms);
             row("red:carry_m", red_carry_m_ms);
             row("red:ntt_m", red_ntt_m_ms);
-            row("red:pmul_N+INTT", red_pmul_n_ms);
-            row("red:add_carry", red_add_carry_ms);
+            row("red:pmul_N", red_pmul_n_ms);
+            row("red:intt_N", red_intt_n_ms);
+            row("red:vadd", red_vadd_ms);
+            row("red:carry_T", red_add_carry_ms);
             row("red:shift_right", red_shift_ms);
             row("cond_sub", cond_sub_ms);
             printf("  └─ %-22s %8.3fs\n", "TOTAL", total / 1000.0f);
         }
     } perf;
 
+    // Liga/desliga coleta de tempos. Quando false, TSTART/TSTOP e perf_flush
+    // viram no-op — zero overhead de cudaEventRecord no hot path.
+    bool perf_enabled = false;
+
     // Ring de eventos para profiling sem sync no hot path.
     // TSTART/TSTOP gravam eventos sem bloquear; perf_flush() sincroniza UMA vez
     // no final de cada mont_mul_batch/mont_sq_batch e acumula todos os tempos.
-    // 12 cobre as 11 seções máximas de mont_mul_batch (reduce tem 7 + 4 extras).
     static constexpr int PERF_RING = 32;
     cudaEvent_t ev_ring[PERF_RING + 1] = {};
     float *acc_ring[PERF_RING] = {};
