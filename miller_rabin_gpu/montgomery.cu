@@ -519,13 +519,14 @@ void BatchMontCtx::check_passed(const Data64 *d_r_mont, uint8_t *d_passed,
 // Grava o marco de fim, registra o acumulador — sem sync.
 // perf_flush() no final da função pública sincroniza uma única vez.
 // No-op quando perf_enabled == false.
-#define TSTOP(acc)                                         \
+#define TSTOP(stage)                                       \
     do                                                     \
     {                                                      \
         if (perf_enabled)                                  \
         {                                                  \
             CU(cudaEventRecord(ev_ring[ring_cur + 1], s)); \
-            acc_ring[ring_cur] = &(acc);                   \
+            acc_ring[ring_cur] = &((stage).ms);            \
+            (stage).calls++;                               \
             ring_cur++;                                    \
         }                                                  \
     } while (0)
@@ -556,59 +557,65 @@ void BatchMontCtx::reduce_batch(Data64 *d_out, cudaStream_t s)
     extract_low_batch<<<dim3(bp, nb), thr, 0, s>>>(
         ntt.d_buf_A, d_T, n_limbs, padded, n_sum, n_batch);
     ntt.fwd_A(s);
-    TSTOP(perf.red_ntt_tlow_ms);
+    TSTOP(perf_cur->red_ntt_tlow);
 
-    // Passo 2: buf_A = INTT(NTT(T_low) * NTT(N')) = T_low * N' (convolução polinomial)
+    //   buf_A = INTT(NTT(T_low) * NTT(N')) = T_low * N' (convolução polinomial)
     //   Resultado raw (sem carry) fica em buf_A.
     TSTART();
     ntt.pmul_ext(d_ntt_Nprime, s);
-    TSTOP(perf.red_pmul_np_ms);
+    TSTOP(perf_cur->red_pmul_np);
     TSTART();
     ntt.intt_A(s);
-    TSTOP(perf.red_intt_np_ms);
+    TSTOP(perf_cur->red_intt_np);
 
-    // Passo 3: normaliza m — propaga carries nos coeficientes brutos do INTT.
+    //   normaliza m — propaga carries nos coeficientes brutos do INTT.
     //   Resultado normalizado (limbs de 16 bits) vai para d_m [n_batch * n_limbs].
     TSTART();
     ntt.carry_to_limbs(d_m, n_limbs, s);
-    TSTOP(perf.red_carry_m_ms);
+    TSTOP(perf_cur->red_carry_m);
 
-    // Passo 4: mN = m * N
+    // Passo 2: mN = m * N
     //   Transforma m para o domínio NTT para multiplicar por NTT(N) pré-computado.
     TSTART();
     ntt.ntt_A(d_m, n_limbs, s);
-    TSTOP(perf.red_ntt_m_ms);
+    TSTOP(perf_cur->red_ntt_m);
 
-    // Passo 5: buf_A = INTT(NTT(m) * NTT(N)) = m * N (convolução polinomial)
+    // buf_A = INTT(NTT(m) * NTT(N)) = m * N (convolução polinomial)
     TSTART();
     ntt.pmul_ext(d_ntt_N, s);
-    TSTOP(perf.red_pmul_n_ms);
+    TSTOP(perf_cur->red_pmul_n);
     TSTART();
     ntt.intt_A(s);
-    TSTOP(perf.red_intt_n_ms);
+    TSTOP(perf_cur->red_intt_n);
 
-    // Passo 6: T += mN, normaliza carries.
+    // Passo 3: T += mN, normaliza carries.
     //   (T + mN) é divisível por R por construção; o resultado normalizado
     //   fica em d_T [n_batch * n_sum] pronto para o shift.
 #if CARRY_NORM_ALG == CARRY_ALG_SEQUENTIAL
     TSTART();
     ntt.add_raw_buf_and_carry(d_T, n_sum, s);
-    TSTOP(perf.red_add_carry_ms);
+    TSTOP(perf_cur->red_carry_add);
 #else
     TSTART();
     ntt.vadd_raw_buf(d_T, n_sum, s);
-    TSTOP(perf.red_vadd_ms);
+    TSTOP(perf_cur->red_vadd);
     TSTART();
     ntt.carry_after_vadd(d_T, n_sum, s);
-    TSTOP(perf.red_add_carry_ms);
+    TSTOP(perf_cur->red_carry_add);
 #endif
 
-    // Passo 7: out = (T + mN) / R = shift direito por n_limbs posições.
+    // Passo 4: out = (T + mN) / R = shift direito por n_limbs posições.
     //   shift_right copia d_T[n_limbs .. n_limbs+n_limbs-1] para d_out.
     TSTART();
     shift_right_batch<<<dim3(bl, nb), thr, 0, s>>>(
         d_out, d_T, n_limbs, n_limbs, n_sum, n_batch);
-    TSTOP(perf.red_shift_ms);
+    TSTOP(perf_cur->red_shift);
+
+    // Passo 5: subtração condicional — garante out < N.
+    //   Após a redução out está em [0, 2N); se out >= N, subtrai N (raro mas possível).
+    TSTART();
+    cond_sub_batch(d_out, s);
+    TSTOP(perf_cur->cond_sub);
 }
 
 void BatchMontCtx::cond_sub_batch(Data64 *d_x, cudaStream_t s)
@@ -629,6 +636,7 @@ void BatchMontCtx::cond_sub_batch(Data64 *d_x, cudaStream_t s)
 void BatchMontCtx::mont_mul_batch(const Data64 *d_A, const Data64 *d_B, Data64 *d_out,
                                   cudaStream_t s)
 {
+    perf_cur = &perf_mul; // acumula tempos no contexto de multiplicação
     // Passo 1 — produto polinomial A * B → d_buf_A (raw, sem carry).
     //   NTT: transforma A e B, multiplica pontualmente, INTT de volta.
     //   SCHOOLBOOK: convolução direta O(n²), escreve coefs brutos em d_buf_A.
@@ -638,33 +646,28 @@ void BatchMontCtx::mont_mul_batch(const Data64 *d_A, const Data64 *d_B, Data64 *
 #elif MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
     ntt.schoolbook_mul(d_A, d_B, n_limbs, s);
 #endif
-    TSTOP(perf.ntt_input_ms);
+    TSTOP(perf_cur->ntt_input);
 
     // Passo 2 — (apenas NTT) multiplicação pontual + INTT.
     //   Para SCHOOLBOOK, d_buf_A já tem os coefs brutos do passo anterior.
 #if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     TSTART();
     ntt.pmul(s);
-    TSTOP(perf.pmul_ms);
+    TSTOP(perf_cur->pmul);
     TSTART();
     ntt.intt_A(s);
-    TSTOP(perf.intt_product_ms);
+    TSTOP(perf_cur->intt_product);
 #endif
 
     // Passo 3: normaliza T — propaga carries dos coeficientes brutos do INTT.
     //   Resultado vai para d_T [n_batch * n_sum] com limbs de 16 bits.
     TSTART();
     ntt.carry_to_limbs(d_T, n_sum, s);
-    TSTOP(perf.carry_product_ms);
+    TSTOP(perf_cur->carry_product);
 
-    // Passo 4: redução Montgomery — out = T * R^{-1} mod N.
+    // Passo 4: redução Montgomery (out = T * R^{-1} mod N) + subtração condicional.
     reduce_batch(d_out, s);
 
-    // Passo 5: subtração condicional — garante out < N.
-    //   Se out >= N após a redução, subtrai N (raro mas possível).
-    TSTART();
-    cond_sub_batch(d_out, s);
-    TSTOP(perf.cond_sub_ms);
     perf_flush(s); // único sync por chamada
 }
 
@@ -674,6 +677,7 @@ void BatchMontCtx::mont_mul_batch(const Data64 *d_A, const Data64 *d_B, Data64 *
 // no domínio NTT em vez de pmul — economiza NTT(B) e metade das multiplicações.
 void BatchMontCtx::mont_sq_batch(const Data64 *d_A, Data64 *d_out, cudaStream_t s)
 {
+    perf_cur = &perf_sq; // acumula tempos no contexto de quadrado
     // Passo 1 — quadrado polinomial A² → d_buf_A (raw, sem carry).
     TSTART();
 #if MONT_MUL_ALG == MONT_MUL_ALG_NTT
@@ -681,32 +685,27 @@ void BatchMontCtx::mont_sq_batch(const Data64 *d_A, Data64 *d_out, cudaStream_t 
 #elif MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
     ntt.schoolbook_sq(d_A, n_limbs, s);
 #endif
-    TSTOP(perf.ntt_input_ms);
+    TSTOP(perf_cur->ntt_input);
 
     // Passo 2 — (apenas NTT) PSQ pontual + INTT.
 #if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     TSTART();
     ntt.psq(s);
-    TSTOP(perf.pmul_ms);
+    TSTOP(perf_cur->pmul);
     TSTART();
     ntt.intt_A(s);
-    TSTOP(perf.intt_product_ms);
+    TSTOP(perf_cur->intt_product);
 #endif
 
     // Passo 3: normaliza T — propaga carries dos coeficientes brutos do INTT.
     //   Resultado vai para d_T [n_batch * n_sum] com limbs de 16 bits.
     TSTART();
     ntt.carry_to_limbs(d_T, n_sum, s);
-    TSTOP(perf.carry_product_ms);
+    TSTOP(perf_cur->carry_product);
 
-    // Passo 4: redução Montgomery — out = T * R^{-1} mod N.
+    // Passo 4: redução Montgomery (out = T * R^{-1} mod N) + subtração condicional.
     reduce_batch(d_out, s);
 
-    // Passo 5: subtração condicional — garante out < N.
-    //   Se out >= N após a redução, subtrai N (raro mas possível).
-    TSTART();
-    cond_sub_batch(d_out, s);
-    TSTOP(perf.cond_sub_ms);
     perf_flush(s); // único sync por chamada
 }
 

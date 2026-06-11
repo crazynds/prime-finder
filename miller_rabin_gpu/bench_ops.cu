@@ -8,6 +8,7 @@
 #include "bench_ops.cuh"
 #include "montgomery.cuh"
 #include "miller_rabin_runner.cuh"
+#include "time_format.h"
 #include "config.h"
 #include <gmp.h>
 #include <cstdio>
@@ -559,52 +560,52 @@ void run_bench_ops(bool long_run)
         printf("  GPU mul          ... ");
         fflush(stdout);
         results[0][c] = bench_gpu_mul_only(bits, last);
-        printf("%.2fs\n", results[0][c].elapsed_sec);
+        printf("%s\n", fmt_time(results[0][c].elapsed_sec).c_str());
 
         printf("  GPU sq           ... ");
         fflush(stdout);
         results[1][c] = bench_gpu_sq_only(bits, last);
-        printf("%.2fs\n", results[1][c].elapsed_sec);
+        printf("%s\n", fmt_time(results[1][c].elapsed_sec).c_str());
 
         printf("  GPU mont_mul     ... ");
         fflush(stdout);
         results[2][c] = bench_gpu_mul(bits, last);
-        printf("%.2fs\n", results[2][c].elapsed_sec);
+        printf("%s\n", fmt_time(results[2][c].elapsed_sec).c_str());
 
         printf("  GPU mont_sq      ... ");
         fflush(stdout);
         results[3][c] = bench_gpu_sq(bits, last);
-        printf("%.2fs\n", results[3][c].elapsed_sec);
+        printf("%s\n", fmt_time(results[3][c].elapsed_sec).c_str());
 
         printf("  GPU miller-rabin ... ");
         fflush(stdout);
         results[4][c] = bench_gpu_mr(bits, last);
-        printf("%.2fs\n", results[4][c].elapsed_sec);
+        printf("%s\n", fmt_time(results[4][c].elapsed_sec).c_str());
 
         printf("  GMP mul          ... ");
         fflush(stdout);
         results[5][c] = bench_gmp_mul_only(bits, last);
-        printf("%.2fs\n", results[5][c].elapsed_sec);
+        printf("%s\n", fmt_time(results[5][c].elapsed_sec).c_str());
 
         printf("  GMP sq           ... ");
         fflush(stdout);
         results[6][c] = bench_gmp_sq_only(bits, last);
-        printf("%.2fs\n", results[6][c].elapsed_sec);
+        printf("%s\n", fmt_time(results[6][c].elapsed_sec).c_str());
 
         printf("  GMP mul+mod      ... ");
         fflush(stdout);
         results[7][c] = bench_gmp_mul(bits, last);
-        printf("%.2fs\n", results[7][c].elapsed_sec);
+        printf("%s\n", fmt_time(results[7][c].elapsed_sec).c_str());
 
         printf("  GMP sq+mod       ... ");
         fflush(stdout);
         results[8][c] = bench_gmp_sq(bits, last);
-        printf("%.2fs\n", results[8][c].elapsed_sec);
+        printf("%s\n", fmt_time(results[8][c].elapsed_sec).c_str());
 
         printf("  GMP miller-rabin ... ");
         fflush(stdout);
         results[9][c] = bench_gmp_mr(bits, last);
-        printf("%.2fs\n\n", results[9][c].elapsed_sec);
+        printf("%s\n\n", fmt_time(results[9][c].elapsed_sec).c_str());
     }
 
     // ── Tabela ────────────────────────────────────────────────────────────────

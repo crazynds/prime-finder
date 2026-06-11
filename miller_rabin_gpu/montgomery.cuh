@@ -6,8 +6,11 @@
 
 #include "config.h"
 #include "bigint_ntt.cuh"
-#include "config.h"
+#include "time_format.h"
 #include <vector>
+#include <string>
+#include <algorithm>
+#include <functional>
 #include <gmp.h>
 #include <cuda_runtime.h>
 
@@ -41,71 +44,252 @@ struct BatchMontCtx
 
     // Acumuladores de tempo por seção de kernel (ms, via CUDA events).
     // Cada campo corresponde a exatamente um par TSTART/TSTOP.
+    // Um estágio cronometrado: tempo acumulado (ms) e nº de chamadas.
+    struct Stage
+    {
+        float ms = 0;
+        long long calls = 0;
+        Stage operator+(const Stage &o) const { return {ms + o.ms, calls + o.calls}; }
+    };
+
     struct PerfInner
     {
         // NTT: mul: load_padded(A+B)+NTT(A+B) | sq: load_padded(A)+NTT(A)
         // Schoolbook: schoolbook_mul / schoolbook_sq
-        float ntt_input_ms = 0;
+        Stage ntt_input;
         // NTT: mul: pmul_batch | sq: psq_batch
-        float pmul_ms = 0;
+        Stage pmul;
         // NTT: INTT após pmul/psq
-        float intt_product_ms = 0;
+        Stage intt_product;
         // carry_intra + carry_inter sobre T (resultado do produto/quadrado)
-        float carry_product_ms = 0;
+        Stage carry_product;
         // reduce: extract_low(T) + fwd_A — prepara T_low para multiplicar por N'
-        float red_ntt_tlow_ms = 0;
+        Stage red_ntt_tlow;
         // reduce: pmul_ext(N') — multiplicação pontual T_low * N'
-        float red_pmul_np_ms = 0;
+        Stage red_pmul_np;
         // reduce: INTT após pmul(N')
-        float red_intt_np_ms = 0;
+        Stage red_intt_np;
         // reduce: carry_intra + carry_inter sobre m
-        float red_carry_m_ms = 0;
+        Stage red_carry_m;
         // reduce: load_padded(m) + NTT(m) — transforma m para multiplicar por N
-        float red_ntt_m_ms = 0;
+        Stage red_ntt_m;
         // reduce: pmul_ext(N) — multiplicação pontual m * N
-        float red_pmul_n_ms = 0;
+        Stage red_pmul_n;
         // reduce: INTT após pmul(N)
-        float red_intt_n_ms = 0;
+        Stage red_intt_n;
         // reduce: vadd_from_raw — T += mN (soma antes do carry)
-        float red_vadd_ms = 0;
+        Stage red_vadd;
         // reduce: carry_intra + carry_inter sobre T após vadd
-        float red_add_carry_ms = 0;
+        Stage red_carry_add;
         // reduce: shift_right(T, n_limbs) — resultado final = T[n_limbs..]
-        float red_shift_ms = 0;
+        Stage red_shift;
         // cs_phase1 + cs_resolve + cs_apply — subtração condicional mod N
-        float cond_sub_ms = 0;
+        Stage cond_sub;
 
-        void print() const
+        // Soma campo a campo — usado para o resumo combinado (mul + sq).
+        PerfInner operator+(const PerfInner &o) const
         {
-            float total = ntt_input_ms + pmul_ms + intt_product_ms + carry_product_ms + red_ntt_tlow_ms + red_pmul_np_ms + red_intt_np_ms + red_carry_m_ms + red_ntt_m_ms + red_pmul_n_ms + red_intt_n_ms + red_vadd_ms + red_add_carry_ms + red_shift_ms + cond_sub_ms;
-            auto pct = [&](float v)
-            { return total > 0 ? v * 100.0f / total : 0.0f; };
-            auto row = [&](const char *name, float ms)
-            {
-                printf("  ├─ %-22s %8.3fs  %5.1f%%\n", name, ms / 1000.0f, pct(ms));
-            };
-#if MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
-            row("schoolbook_mul/sq", ntt_input_ms);
-#else
-            row("ntt_input", ntt_input_ms);
-            row("pmul/psq", pmul_ms);
-            row("intt_product", intt_product_ms);
-#endif
-            row("carry_product", carry_product_ms);
-            row("red:ntt_Tlow", red_ntt_tlow_ms);
-            row("red:pmul_Np", red_pmul_np_ms);
-            row("red:intt_Np", red_intt_np_ms);
-            row("red:carry_m", red_carry_m_ms);
-            row("red:ntt_m", red_ntt_m_ms);
-            row("red:pmul_N", red_pmul_n_ms);
-            row("red:intt_N", red_intt_n_ms);
-            row("red:vadd", red_vadd_ms);
-            row("red:add_carry", red_add_carry_ms);
-            row("red:shift_right", red_shift_ms);
-            row("cond_sub", cond_sub_ms);
-            printf("  └─ %-22s %8.3fs\n", "TOTAL", total / 1000.0f);
+            PerfInner r;
+            r.ntt_input = ntt_input + o.ntt_input;
+            r.pmul = pmul + o.pmul;
+            r.intt_product = intt_product + o.intt_product;
+            r.carry_product = carry_product + o.carry_product;
+            r.red_ntt_tlow = red_ntt_tlow + o.red_ntt_tlow;
+            r.red_pmul_np = red_pmul_np + o.red_pmul_np;
+            r.red_intt_np = red_intt_np + o.red_intt_np;
+            r.red_carry_m = red_carry_m + o.red_carry_m;
+            r.red_ntt_m = red_ntt_m + o.red_ntt_m;
+            r.red_pmul_n = red_pmul_n + o.red_pmul_n;
+            r.red_intt_n = red_intt_n + o.red_intt_n;
+            r.red_vadd = red_vadd + o.red_vadd;
+            r.red_carry_add = red_carry_add + o.red_carry_add;
+            r.red_shift = red_shift + o.red_shift;
+            r.cond_sub = cond_sub + o.cond_sub;
+            return r;
         }
-    } perf;
+
+    } perf_mul, perf_sq;
+
+    // Aponta para o acumulador do contexto atual (mont_mul_batch vs mont_sq_batch).
+    PerfInner *perf_cur = &perf_mul;
+
+    // Fase de host fornecida pelo chamador (ex.: setup, tabela, memcpy). Entra na
+    // árvore como folha sintética sob o grupo "setup / host".
+    struct HostPhase
+    {
+        const char *name;
+        float ms;
+        std::string note; // anotação opcional (ex.: "(17.5 GB/s)")
+    };
+
+    // Imprime UMA árvore: root TOTAL → {mont_mul, mont_sq, setup/host, others}.
+    // app_total_ms = tempo total da aplicação; o nó "others (overhead)" recebe a
+    // diferença para os tempos medidos (kernel launch, loop, gaps). host = fases de
+    // host (setup/tabela/memcpy/...) agrupadas sob "setup / host".
+    // No fim, a visão cross-cutting por tipo de kernel (acumulada mul + sq).
+    void print_perf(double app_total_ms = 0.0,
+                    const std::vector<HostPhase> &host = {}) const
+    {
+        // Nó da árvore: folha com Stage (st), folha sintética (extra >= 0) ou grupo.
+        struct Node
+        {
+            std::string name;
+            const Stage *st = nullptr;
+            float extra = -1.0f;
+            std::string note;
+            std::vector<Node> kids;
+        };
+        auto L = [](const char *n, const Stage *s)
+        { Node x; x.name = n; x.st = s; return x; };
+        auto G = [](const char *n, std::vector<Node> k)
+        { Node x; x.name = n; x.kids = std::move(k); return x; };
+        auto F = [](const char *n, float ms, std::string note = "")
+        { Node x; x.name = n; x.extra = ms; x.note = std::move(note); return x; };
+
+        // Subárvore de um contexto (mont_mul ou mont_sq) com os passos do algoritmo.
+        auto ctx = [&](const char *name, const PerfInner &p) -> Node
+        {
+#if MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
+            Node produto = G("multiplicacao (produto)", {L("schoolbook_mul/sq", &p.ntt_input), L("carry_product", &p.carry_product)});
+#else
+            Node produto = G("multiplicacao (produto)", {L("ntt_input", &p.ntt_input), L("pmul/psq", &p.pmul), L("intt_product", &p.intt_product), L("carry_product", &p.carry_product)});
+#endif
+            Node reducao = G("reducao Montgomery", {
+                                                       G("Multiplicacao", {L("ntt_Tlow", &p.red_ntt_tlow), L("pmul_Np", &p.red_pmul_np), L("intt_Np", &p.red_intt_np), L("carry_m", &p.red_carry_m), L("ntt_m", &p.red_ntt_m), L("pmul_N", &p.red_pmul_n), L("intt_N", &p.red_intt_n)}),
+                                                       G("Soma", {L("vadd", &p.red_vadd), L("carry_add", &p.red_carry_add)}),
+                                                       L("shift_right", &p.red_shift),
+                                                   });
+            return G(name, {produto, reducao, L("cond_sub", &p.cond_sub)});
+        };
+
+        Node root = G("TOTAL", {ctx("mont_mul", perf_mul), ctx("mont_sq", perf_sq)});
+        // Grupo das fases de host (setup, tabela, memcpy, ...).
+        if (!host.empty())
+        {
+            std::vector<Node> hk;
+            for (auto &h : host)
+                hk.push_back(F(h.name, h.ms, h.note));
+            root.kids.push_back(G("setup / host", std::move(hk)));
+        }
+
+        std::function<float(const Node &)> nodeMs = [&](const Node &n) -> float
+        {
+            if (n.st)
+                return n.st->ms;
+            if (n.extra >= 0.0f)
+                return n.extra;
+            float t = 0;
+            for (auto &k : n.kids)
+                t += nodeMs(k);
+            return t;
+        };
+
+        // "others (overhead)" = total da aplicação - tudo que foi medido.
+        if (app_total_ms > 0.0)
+        {
+            float measured = 0;
+            for (auto &k : root.kids)
+                measured += nodeMs(k);
+            float others = (float)app_total_ms - measured;
+            if (others > 0.0f)
+                root.kids.push_back(F("others (overhead)", others));
+        }
+
+        float total = nodeMs(root);
+        auto pct = [&](float v)
+        { return total > 0 ? v * 100.0f / total : 0.0f; };
+        auto avg = [](const Stage &s)
+        { return s.calls > 0 ? (double)s.ms / (double)s.calls : 0.0; };
+
+        // Largura VISÍVEL de um label: conta code points UTF-8 (cada ├─│ é 1 coluna
+        // mas ocupa 3 bytes), não bytes — senão %-Ns desalinha nos níveis profundos.
+        auto padlbl = [](const std::string &s, int w) -> std::string
+        {
+            int cols = 0;
+            for (unsigned char c : s)
+                if ((c & 0xC0) != 0x80) // ignora bytes de continuação UTF-8
+                    cols++;
+            std::string r = s;
+            for (int i = cols; i < w; i++)
+                r += ' ';
+            return r;
+        };
+        constexpr int LBL_W = 36;
+
+        // Impressão recursiva. Ordena filhos por tempo (== tempo/call, calls iguais).
+        std::function<void(const Node &, const std::string &, bool)> rec =
+            [&](const Node &n, const std::string &prefix, bool last)
+        {
+            std::string label = padlbl(prefix + (last ? "└─ " : "├─ ") + n.name, LBL_W);
+            float ms = nodeMs(n);
+            const char *note = n.note.empty() ? "" : n.note.c_str();
+            if (n.st)
+                printf("  %s %12s  %5.1f%%  %12s/call %s\n",
+                       label.c_str(), fmt_time_ms(ms).c_str(), pct(ms),
+                       fmt_time_ms(avg(*n.st)).c_str(), note);
+            else if (n.extra >= 0.0f)
+                printf("  %s %12s  %5.1f%% %s\n",
+                       label.c_str(), fmt_time_ms(ms).c_str(), pct(ms), note);
+            else
+            {
+                printf("  %s %12s  %5.1f%%\n", label.c_str(), fmt_time_ms(ms).c_str(), pct(ms));
+                std::vector<const Node *> ks;
+                for (auto &k : n.kids)
+                    ks.push_back(&k);
+                std::sort(ks.begin(), ks.end(), [&](const Node *a, const Node *b)
+                          { return nodeMs(*a) > nodeMs(*b); });
+                std::string cp = prefix + (last ? "   " : "│  ");
+                for (size_t i = 0; i < ks.size(); i++)
+                    rec(*ks[i], cp, i + 1 == ks.size());
+            }
+        };
+
+        // Root impresso sem conector; filhos (mont_mul/mont_sq) ordenados por tempo.
+        printf("  %s %12s  %5.1f%%\n", padlbl(root.name, LBL_W).c_str(), fmt_time_ms(total).c_str(), 100.0);
+        std::vector<const Node *> ctxs;
+        for (auto &k : root.kids)
+            ctxs.push_back(&k);
+        std::sort(ctxs.begin(), ctxs.end(), [&](const Node *a, const Node *b)
+                  { return nodeMs(*a) > nodeMs(*b); });
+        for (size_t i = 0; i < ctxs.size(); i++)
+            rec(*ctxs[i], "", i + 1 == ctxs.size());
+
+        // ── Visão cross-cutting por tipo de kernel (acumulada mul + sq) ──
+        PerfInner all = perf_mul + perf_sq;
+        auto sumc = [&](std::initializer_list<const Stage *> ss)
+        {
+            float t = 0;
+            for (auto *s : ss)
+                t += s->ms;
+            return t;
+        };
+#if MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
+        float ntt_t = sumc({&all.red_ntt_tlow, &all.red_intt_np, &all.red_ntt_m, &all.red_intt_n});
+        float pw_t = sumc({&all.red_pmul_np, &all.red_pmul_n});
+        float prod_t = all.ntt_input.ms; // convolução schoolbook
+#else
+        float ntt_t = sumc({&all.ntt_input, &all.intt_product, &all.red_ntt_tlow, &all.red_intt_np, &all.red_ntt_m, &all.red_intt_n});
+        float pw_t = sumc({&all.pmul, &all.red_pmul_np, &all.red_pmul_n});
+        float prod_t = 0;
+#endif
+        float carry_t = sumc({&all.carry_product, &all.red_carry_m, &all.red_carry_add});
+        float add_t = all.red_vadd.ms;
+        float shift_t = all.red_shift.ms;
+        float cs_t = all.cond_sub.ms;
+        auto crow = [&](const char *name, float ms)
+        {
+            if (ms > 0)
+                printf("     %-20s %12s  %5.1f%%\n", name, fmt_time_ms(ms).c_str(), pct(ms));
+        };
+        printf("\n  por tipo de kernel (acumulado):\n");
+        crow("NTT/INTT", ntt_t);
+        crow("pointwise (pmul)", pw_t);
+        crow("carry", carry_t);
+        crow("soma (vadd)", add_t);
+        crow("shift", shift_t);
+        crow("cond_sub", cs_t);
+        crow("produto direto", prod_t);
+    }
 
     // Liga/desliga coleta de tempos. Quando false, TSTART/TSTOP e perf_flush
     // viram no-op — zero overhead de cudaEventRecord no hot path.

@@ -8,6 +8,11 @@ set(MR_WINDOW_BITS 8)
 # Candidatos por chamada GPU. Quanto maior, mais VRAM usada.
 set(MR_BATCH_SIZE 256)
 
+# Limite de registradores por thread na compilação CUDA (nvcc -maxrregcount).
+# 0 = sem limite (deixa o nvcc decidir). Valores menores aumentam a ocupação
+# da GPU às custas de possíveis spills para memória local.
+set(MR_MAXRREGCOUNT 0)
+
 # Threads por bloco de cada kernel (múltiplo de 32)
 set(MR_THR_LOAD        256)
 set(MR_THR_PMUL        256)
@@ -16,10 +21,10 @@ set(MR_THR_SELECT_WIN  256)
 set(MR_THR_CHECK       256)
 set(MR_CARRY_INTER_THR  32)
 
-# Algoritmo de carry: CARRY_ALG_SEQUENTIAL | CARRY_ALG_SINGLE_TILE | CARRY_ALG_MULTI_TILE
+# Algoritmo de carry: CARRY_ALG_SEQUENTIAL | CARRY_ALG_SINGLE_TILE | CARRY_ALG_MULTI_TILE | CARRY_ALG_PREFIX_SCAN
 set(CARRY_NORM_ALG CARRY_ALG_SINGLE_TILE)
 
-# Tamanho do tile de carry (threads por bloco, usado pelos algoritmos TILE)
+# Tamanho do tile de carry
 set(MR_CARRY_TILE 32)
 
 # Tile da subtração condicional

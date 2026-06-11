@@ -1,6 +1,7 @@
 // miller_rabin_runner.cu
 #include "miller_rabin_runner.cuh"
 #include "bigint_ntt.cuh"
+#include "time_format.h"
 #include <cstdio>
 #include <chrono>
 #include <algorithm>
@@ -181,9 +182,10 @@ static void window_exp_loop(
                 int done_bits  = (win+1) * WINDOW_BITS;
                 int total_bits = n_windows * WINDOW_BITS;
                 double ms = std::chrono::duration_cast<std::chrono::milliseconds>(now-t_start).count();
-                printf("\r    bit %d/%d  %3d%%  %.1fs  %.2fms/iter   ",
+                printf("\r    bit %d/%d  %3d%%  %s  %s/iter   ",
                        done_bits, total_bits, done_bits*100/total_bits,
-                       ms/1000.0, done_bits>0 ? ms/done_bits : 0.0);
+                       fmt_time_ms(ms).c_str(),
+                       fmt_time_ms(done_bits>0 ? ms/done_bits : 0.0).c_str());
                 fflush(stdout);
             }
         }
@@ -209,23 +211,26 @@ static void print_perf(const PerfCtrs& perf, BatchMontCtx& mont)
     printf("╔══════════════════════════════════════════════════════════════╗\n");
     printf("║  Perfil de tempo — WINDOW_BITS=%-2d                           ║\n", WINDOW_BITS);
     printf("╚══════════════════════════════════════════════════════════════╝\n");
-    printf("  window loop (sq + mul)  %8.2fs  %5.1f%%\n", window_ms/1000.0, pct(window_ms));
-    printf("  ├─ squarings            %8.2fs  %5.1f%%  (%ld sq,  %.3fms/sq)\n",
-           perf.sq_ms/1000.0, pct(perf.sq_ms), perf.sq_calls,
-           perf.sq_calls > 0 ? perf.sq_ms/perf.sq_calls : 0.0f);
-    printf("  └─ mul + select_win     %8.2fs  %5.1f%%  (%ld jan, %.3fms/jan)\n",
-           perf.mul_ms/1000.0, pct(perf.mul_ms), perf.mul_calls,
-           perf.mul_calls > 0 ? perf.mul_ms/perf.mul_calls : 0.0f);
-    printf("\n");
-    printf("  pré-cômputo tabela      %8.2fs  %5.1f%%\n", perf.table_ms/1000.0, pct(perf.table_ms));
-    printf("  check + memcpy          %8.2fs  %5.1f%%\n", perf.check_ms/1000.0, pct(perf.check_ms));
-    printf("  setup CPU (to_mont)     %8.2fs  %5.1f%%\n", perf.setup_ms/1000.0, pct(perf.setup_ms));
-    printf("  memcpy setup            %8.2fs  %5.1f%%  (%.2f GB  →  %.2f GB/s)\n",
-           perf.memcpy_ms/1000.0, pct(perf.memcpy_ms), memcpy_gb, memcpy_gbps);
-    printf("  ────────────────────────────────────────────\n");
-    printf("  TOTAL                   %8.2fs\n\n", total_ms/1000.0);
-    printf("  Breakdown interno (mont_sq + mont_mul acumulado):\n");
-    mont.perf.print();
+    printf("  window loop (sq + mul)  %12s  %5.1f%%\n", fmt_time_ms(window_ms).c_str(), pct(window_ms));
+    printf("  ├─ squarings            %12s  %5.1f%%  (%ld sq,  %s/sq)\n",
+           fmt_time_ms(perf.sq_ms).c_str(), pct(perf.sq_ms), perf.sq_calls,
+           fmt_time_ms(perf.sq_calls > 0 ? perf.sq_ms/perf.sq_calls : 0.0).c_str());
+    printf("  └─ mul + select_win     %12s  %5.1f%%  (%ld jan, %s/jan)\n",
+           fmt_time_ms(perf.mul_ms).c_str(), pct(perf.mul_ms), perf.mul_calls,
+           fmt_time_ms(perf.mul_calls > 0 ? perf.mul_ms/perf.mul_calls : 0.0).c_str());
+    printf("\n  Breakdown da aplicacao (arvore unificada):\n");
+
+    // Fases de host (entram na árvore sob "setup / host"). Só o memcpy carrega
+    // anotação de banda (GB/s).
+    char gbps[32];
+    snprintf(gbps, sizeof(gbps), "(%.2f GB/s)", memcpy_gbps);
+    std::vector<BatchMontCtx::HostPhase> host = {
+        {"pre-computo tabela", perf.table_ms, ""},
+        {"setup CPU (to_mont)", perf.setup_ms, ""},
+        {"check + memcpy", perf.check_ms, ""},
+        {"memcpy setup", perf.memcpy_ms, gbps},
+    };
+    mont.print_perf(total_ms, host);
     carry_stats_print_and_reset();
 }
 

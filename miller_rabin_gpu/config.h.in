@@ -56,6 +56,10 @@
 // Usado pelos algoritmos de TILE
 #define MR_CARRY_TILE @MR_CARRY_TILE@
 
+// Threads por bloco do CARRY_ALG_PREFIX_SCAN (múltiplo de 32, 32..1024).
+// 32 → scan via shuffle (1 warp); >32 → scan hierárquico block-wide.
+#define MR_PSCAN_TILE @MR_PSCAN_TILE@
+
 /** --------------------------------------------------
               Subtração condicional (cond_sub)
 ------------------------------------------------------*/

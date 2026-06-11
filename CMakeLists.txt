@@ -40,6 +40,12 @@ add_compile_options(
 # NVCC: O3 + fast math + detecção automática de arquitetura via CMAKE_CUDA_ARCHITECTURES
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --use_fast_math")
 
+# Limite de registradores por thread (params.cmake: MR_MAXRREGCOUNT, 0 = sem limite)
+if(DEFINED MR_MAXRREGCOUNT AND NOT MR_MAXRREGCOUNT EQUAL 0)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -maxrregcount=${MR_MAXRREGCOUNT}")
+    message(STATUS "CUDA -maxrregcount=${MR_MAXRREGCOUNT}")
+endif()
+
 # ----- Dependencies -----
 find_package(MPI REQUIRED)
 find_package(CUDAToolkit REQUIRED)
