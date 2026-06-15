@@ -59,11 +59,11 @@ struct BatchModCtx
     int *d_bar_k = nullptr;    // [n_batch] bar_k por candidato (device)
     // μ_i = floor(b^{2·bar_k_i}/N_i) por candidato, já transformado (NTT(μ)).
     Data64 *d_ntt_mu = nullptr; // [n_batch * padded]
-    // Scratch da redução de Barrett.
-    Data64 *d_bar_a1 = nullptr; // [n_batch * bar_W1]  A1 = T >> (bar_k-1)
-    Data64 *d_bar_q = nullptr;  // [n_batch * bar_W1]  q̂ estimado / buffer de r
-    Data64 *d_bar_q2 = nullptr; // [n_batch * n_sum]   A1·μ
-    Data64 *d_bar_qn = nullptr; // [n_batch * n_sum]   q̂·N
+    // Scratch da redução de Barrett (tempos de vida disjuntos ⇒ reaproveitados):
+    //   d_bar_w1   [n_batch * bar_W1] — A1 = T>>(k-1), depois q̂, depois resíduo r.
+    //   d_bar_prod [n_batch * n_sum]  — produto intermediário: A1·μ, depois q̂·N.
+    Data64 *d_bar_w1 = nullptr;
+    Data64 *d_bar_prod = nullptr;
 #endif
 
     // Valores de referencia na forma de trabalho — para check sem GMP.
@@ -125,6 +125,14 @@ struct BatchModCtx
         // cs_phase1 + cs_resolve + cs_apply — subtração condicional mod N
         Stage cond_sub;
 
+#if MOD_REDUCTION_ALG == MOD_RED_BARRETT
+        // Etapas exclusivas do Barrett (reduce_barrett.cu).
+        Stage bar_shift;   // shift_right_var_batch (A1 e q̂), acumulado
+        Stage bar_sub;     // r = T − qn (subtração tileada incondicional)
+        Stage bar_condsub; // r −= N, até 2 subtrações condicionais
+        Stage bar_copy;    // copia r[0..n_limbs) → out
+#endif
+
         // Soma campo a campo — usado para o resumo combinado (mul + sq).
         PerfInner operator+(const PerfInner &o) const
         {
@@ -144,6 +152,12 @@ struct BatchModCtx
             r.red_carry_add = red_carry_add + o.red_carry_add;
             r.red_shift = red_shift + o.red_shift;
             r.cond_sub = cond_sub + o.cond_sub;
+#if MOD_REDUCTION_ALG == MOD_RED_BARRETT
+            r.bar_shift = bar_shift + o.bar_shift;
+            r.bar_sub = bar_sub + o.bar_sub;
+            r.bar_condsub = bar_condsub + o.bar_condsub;
+            r.bar_copy = bar_copy + o.bar_copy;
+#endif
             return r;
         }
 

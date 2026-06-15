@@ -28,6 +28,8 @@
 #define MR_THR_SELECT_WIN @MR_THR_SELECT_WIN@
 // check_passed_kernel / check_equals_kernel: compara resultado MR com 1 ou N-1
 #define MR_THR_CHECK @MR_THR_CHECK@
+// bar_copy_out (Barrett): copia o resíduo final r[0..n_limbs) → out
+#define MR_THR_COPY @MR_THR_COPY@
 // carry_inter_tiles (CARRY_ALG_MULTI_TILE): threads por bloco na fase inter-tile
 #define MR_CARRY_INTER_THR @MR_CARRY_INTER_THR@
 
@@ -65,7 +67,7 @@
 ------------------------------------------------------*/
 
 // cs_phase1 / cs_apply: tamanho do tile da subtração condicional (cond_sub_batch)
-#define MR_CS_TILE @MR_CS_TILE@
+#define MR_SUB_TILE @MR_SUB_TILE@
 
 /** --------------------------------------------------
                        Monitoring

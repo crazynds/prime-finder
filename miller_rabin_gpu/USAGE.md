@@ -79,11 +79,11 @@ Encapsula toda a aritmética modular para um **batch** de candidatos processados
 
 O **algoritmo de redução** é escolhido em tempo de compilação via `MOD_REDUCTION_ALG` (em `params.cmake`):
 
-| Valor                      | Forma de trabalho        | Observações                                                            |
-| -------------------------- | ------------------------ | --------------------------------------------------------------------- |
-| `MOD_RED_MONTGOMERY`       | Montgomery (`x·R mod N`) | REDC clássico via NTT. Padrão.                                         |
-| `MOD_RED_BARRETT`          | resíduo plano (`x mod N`)| μ = ⌊b^{2k}/N⌋ pré-computado; 2 multiplicações via NTT + finalize. Exige que todos os candidatos do batch tenham a **mesma magnitude** (mesmo nº de limbs tight de N — vale para candidatos esparsos). |
-| `MOD_RED_BURNIKEL_ZIEGLER` | —                        | **Não implementado** (erro de compilação claro).                      |
+| Valor                      | Forma de trabalho         | Observações                                                                                                                                                                                            |
+| -------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `MOD_RED_MONTGOMERY`       | Montgomery (`x·R mod N`)  | REDC clássico via NTT. Padrão.                                                                                                                                                                         |
+| `MOD_RED_BARRETT`          | resíduo plano (`x mod N`) | μ = ⌊b^{2k}/N⌋ pré-computado; 2 multiplicações via NTT + finalize. Exige que todos os candidatos do batch tenham a **mesma magnitude** (mesmo nº de limbs tight de N — vale para candidatos esparsos). |
+| `MOD_RED_BURNIKEL_ZIEGLER` | —                         | **Não implementado** (erro de compilação claro).                                                                                                                                                       |
 
 A interface abaixo é a mesma para qualquer algoritmo: a "forma de trabalho" muda conforme o backend, mas `to_residue_batch`/`from_residue_batch` sempre convertem de/para o inteiro normal, e `d_one_res`/`d_Nm1_res` guardam `1` e `N-1` na forma de trabalho.
 
@@ -289,7 +289,7 @@ Todos os parâmetros de tuning estão centralizados em `config.h`. Redefina-os a
 | `MR_WINDOW_BITS`          | `8`    | Bits por janela na exponenciação sliding-window. Mais bits = menos muls, mais VRAM (tabela de 2^k entradas). |
 | `MR_BATCH_SIZE`           | `128`  | Candidatos por batch de GPU. Reduza se a VRAM for insuficiente.                                              |
 | `MR_BLOCK_THREADS`        | `256`  | Threads por bloco CUDA (kernels internos). Deve ser múltiplo de 32.                                          |
-| `MR_CS_TILE`              | `256`  | Tamanho do tile na subtração condicional de Montgomery.                                                      |
+| `MR_SUB_TILE`             | `256`  | Tamanho do tile na subtração condicional de Montgomery.                                                      |
 | `MR_PERF_RING`            | `12`   | Profundidade do ring de eventos CUDA para profiling interno.                                                 |
 | `MR_PROGRESS_INTERVAL_MS` | `2000` | Intervalo mínimo (ms) entre atualizações da barra de progresso.                                              |
 

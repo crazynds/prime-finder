@@ -50,7 +50,7 @@ __global__ static void shift_right_batch(Data64 *__restrict__ dst,
 // Kernel 2 (cs_resolve): 1 thread por candidato, resolve cmp global + borrow_in por tile.
 // Kernel 3 (cs_apply):   aplica subtração tile a tile com borrow_in correto.
 
-static constexpr int CS_TILE = MR_CS_TILE;
+static constexpr int CS_TILE = MR_SUB_TILE;
 
 // Composição de estados G/P/K para borrow:
 //   state = bw0 | (bw1 << 1)   (bw0 = borrow_out dado borrow_in=0, bw1 dado borrow_in=1)
@@ -277,6 +277,9 @@ void BatchModCtx::precompute_reduction(const std::vector<uint64_t> &N_all)
     CU(cudaMalloc(&d_cs_tile_bstate, csb));
     CU(cudaMalloc(&d_cs_tile_bin, csb));
 
+    // Workspace de m (NTT) — exclusivo do REDC de Montgomery.
+    CU(cudaMalloc(&d_m, pb));
+
     // N' por candidato → GPU; NTT(N') pré-computado.
     CU(cudaMalloc(&d_Nprime, nb));
     CU(cudaMalloc(&d_ntt_Nprime, pb));
@@ -290,6 +293,7 @@ void BatchModCtx::precompute_reduction(const std::vector<uint64_t> &N_all)
 
 void BatchModCtx::free_reduction()
 {
+    cudaFree(d_m);
     cudaFree(d_Nprime);
     cudaFree(d_ntt_Nprime);
     cudaFree(d_cs_tile_cmp);

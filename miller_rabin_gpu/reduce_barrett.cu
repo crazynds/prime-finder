@@ -30,66 +30,176 @@ __global__ static void shift_right_var_batch(
     dst[cand * n_out + j] = (s >= 0 && s < n_src) ? src[cand * n_src + s] : 0ULL;
 }
 
-// Finalização (1 thread por candidato): r = T − q̂·N nos W1 limbs baixos (os limbs
-// altos de T e q̂·N se cancelam pois 0 <= r_true < 3N < b^{W1}); depois até 2
-// subtrações condicionais de N. bar_k POR-candidato, W1 = max(bar_k)+1.
-__global__ static void barrett_finalize(
-    Data64 *__restrict__ out,
-    const Data64 *__restrict__ T,
-    const Data64 *__restrict__ qn,
-    const Data64 *__restrict__ N,
-    Data64 *__restrict__ scratch,
-    const int *__restrict__ bark,
-    int W1, int out_limbs, int n_sum, int n_batch)
+// ── Finalização paralela (subtração tileada com prefix-scan de borrow) ────────
+//
+// O finalize do Barrett é r = T − q̂·N seguido de até 2 subtrações condicionais
+// de N (pois 0 <= r_true < 3N). Em vez de 1 thread/candidato serial sobre W1
+// limbs (gargalo quando W1 ~ milhares), usamos o mesmo esquema tileado G/P/K do
+// cond_sub do Montgomery: grid (n_tiles × n_batch), prefix scan O(log CS_TILE).
+//
+// Os kernels são genéricos (strides separados para a/b/out e largura de b por
+// candidato) para servir tanto à subtração incondicional T−qn quanto às
+// subtrações condicionais de N:
+//   • T−qn: incondicional (r_true >= 0 ⇒ borrow_out = 0), b = qn largura W1.
+//   • r−N:  condicional (só se r >= N),                   b = N  largura bar_k.
+static constexpr int CS_TILE = MR_SUB_TILE;
+
+// Composição de estados G/P/K de borrow: state = bw0 | (bw1 << 1).
+__device__ static int bar_cs_combine(int L, int R)
 {
-    int cand = blockIdx.x * blockDim.x + threadIdx.x;
+    int c0 = (R >> (L & 1)) & 1;
+    int c1 = (R >> ((L >> 1) & 1)) & 1;
+    return c0 | (c1 << 1);
+}
+
+// Kernel 1: por tile, comparação a vs b e estado G/P/K de borrow do tile.
+// bk: largura efetiva de b por candidato (nullptr ⇒ usa W). sa/sb: strides.
+__global__ static void bar_sub_phase1(
+    const Data64 *__restrict__ a, int sa,
+    const Data64 *__restrict__ b, int sb,
+    const int *__restrict__ bk, int W,
+    int *__restrict__ tile_cmp, int *__restrict__ tile_bstate, int n_batch)
+{
+    __shared__ Data64 s_a[CS_TILE];
+    __shared__ Data64 s_b[CS_TILE];
+    __shared__ int s_reduce[CS_TILE];
+    __shared__ int s_state[CS_TILE];
+
+    int cand = blockIdx.y, tile = blockIdx.x, tid = threadIdx.x;
+    int j = tile * CS_TILE + tid;
+    int n_tiles = (W + CS_TILE - 1) / CS_TILE;
     if (cand >= n_batch)
         return;
 
-    const int k = bark[cand];
-    const Data64 *t = T + (size_t)cand * n_sum;
-    const Data64 *q = qn + (size_t)cand * n_sum;
-    const Data64 *nn = N + (size_t)cand * out_limbs;
-    Data64 *r = scratch + (size_t)cand * W1;
-    Data64 *o = out + (size_t)cand * out_limbs;
-    const int64_t BASE = (int64_t)1 << LIMB_BITS;
+    int bw = bk ? bk[cand] : W;
+    s_a[tid] = (j < W) ? a[(size_t)cand * sa + j] : 0ULL;
+    s_b[tid] = (j < W && j < bw) ? b[(size_t)cand * sb + j] : 0ULL;
+    __syncthreads();
 
-    // r = T − q̂·N (low W1 limbs; borrow final é 0 por construção).
-    int64_t borrow = 0;
-    for (int j = 0; j < W1; j++)
+    // Comparação: encode (j+1)<<2 | (cmp+1) para redução de máximo.
+    int enc = 1;
+    if (j < W && s_a[tid] != s_b[tid])
+        enc = ((j + 1) << 2) | ((s_a[tid] > s_b[tid]) ? 2 : 0);
+    s_reduce[tid] = enc;
+    __syncthreads();
+    for (int stride = CS_TILE >> 1; stride > 0; stride >>= 1)
     {
-        int64_t d = (int64_t)t[j] - (int64_t)q[j] - borrow;
-        borrow = (d < 0) ? 1 : 0;
-        r[j] = (Data64)(d < 0 ? d + BASE : d);
+        if (tid < stride && s_reduce[tid + stride] > s_reduce[tid])
+            s_reduce[tid] = s_reduce[tid + stride];
+        __syncthreads();
     }
+    if (tid == 0)
+        tile_cmp[cand * n_tiles + tile] = (s_reduce[0] == 1) ? 0 : ((s_reduce[0] & 3) - 1);
 
-    // Até 2 subtrações condicionais de N (r_true < 3N).
-    for (int it = 0; it < 2; it++)
+    int bw0 = (j < W && s_a[tid] < s_b[tid]) ? 1 : 0;
+    int bw1 = (j < W && s_a[tid] <= s_b[tid]) ? 1 : 0;
+    s_state[tid] = bw0 | (bw1 << 1);
+    __syncthreads();
+    for (int stride = 1; stride < CS_TILE; stride <<= 1)
     {
-        int cmp = 0;
-        for (int j = W1 - 1; j >= 0; j--)
-        {
-            Data64 nj = (j < k) ? nn[j] : 0ULL;
-            if (r[j] != nj)
-            {
-                cmp = (r[j] > nj) ? 1 : -1;
-                break;
-            }
-        }
-        if (cmp < 0)
-            break;
-        int64_t bw = 0;
-        for (int j = 0; j < W1; j++)
-        {
-            Data64 nj = (j < k) ? nn[j] : 0ULL;
-            int64_t d = (int64_t)r[j] - (int64_t)nj - bw;
-            bw = (d < 0) ? 1 : 0;
-            r[j] = (Data64)(d < 0 ? d + BASE : d);
-        }
+        int combined = (tid >= stride) ? bar_cs_combine(s_state[tid - stride], s_state[tid])
+                                       : s_state[tid];
+        __syncthreads();
+        s_state[tid] = combined;
+        __syncthreads();
     }
+    int last = min(CS_TILE, W - tile * CS_TILE) - 1;
+    if (tid == last)
+        tile_bstate[cand * n_tiles + tile] = s_state[tid];
+}
 
-    for (int j = 0; j < out_limbs; j++)
-        o[j] = (j < W1) ? r[j] : 0ULL;
+// Kernel 2 (fundido): por tile, resolve o borrow_in do próprio tile e aplica
+// out = a − b. A thread 0 lê os n_tiles (~poucos) resultados de phase1 e:
+//   • se !uncond: acha o cmp global (a >= b?); se a < b, marca skip.
+//   • replay da cadeia de borrow dos tiles [0..tile) → borrow_in deste tile.
+// Isso elimina o kernel resolve de 1-thread/bloco (ocupância 1/CS_TILE).
+// uncond != 0 ⇒ subtração sempre aplicada (T−qn), ignorando a comparação.
+// so: stride de out.
+__global__ static void bar_sub_apply(
+    Data64 *__restrict__ out, int so,
+    const Data64 *__restrict__ a, int sa,
+    const Data64 *__restrict__ b, int sb,
+    const int *__restrict__ bk, int W,
+    const int *__restrict__ tile_cmp, const int *__restrict__ tile_bstate,
+    int uncond, int n_batch)
+{
+    __shared__ Data64 s_a[CS_TILE];
+    __shared__ Data64 s_b[CS_TILE];
+    __shared__ int s_state[CS_TILE];
+    __shared__ int s_tile_bin; // borrow_in deste tile (-1 ⇒ sem subtração)
+
+    int cand = blockIdx.y, tile = blockIdx.x, tid = threadIdx.x;
+    int j = tile * CS_TILE + tid;
+    int n_tiles = (W + CS_TILE - 1) / CS_TILE;
+    if (cand >= n_batch)
+        return;
+
+    if (tid == 0)
+    {
+        const int *cmp = tile_cmp + cand * n_tiles;
+        const int *bstate = tile_bstate + cand * n_tiles;
+        int do_sub = 1;
+        if (!uncond)
+        {
+            int gcmp = 0;
+            for (int t = n_tiles - 1; t >= 0 && gcmp == 0; t--)
+                gcmp = cmp[t];
+            if (gcmp < 0)
+                do_sub = 0; // a < b
+        }
+        int bin = -1;
+        if (do_sub)
+        {
+            int cur = 0; // replay do borrow até o tile atual
+            for (int t = 0; t < tile; t++)
+                cur = (bstate[t] >> cur) & 1;
+            bin = cur;
+        }
+        s_tile_bin = bin;
+    }
+    __syncthreads();
+
+    int tile_bin_v = s_tile_bin;
+    if (tile_bin_v < 0)
+        return; // a < b, sem subtração (out já contém a no caso in-place)
+
+    int bw = bk ? bk[cand] : W;
+    s_a[tid] = (j < W) ? a[(size_t)cand * sa + j] : 0ULL;
+    s_b[tid] = (j < W && j < bw) ? b[(size_t)cand * sb + j] : 0ULL;
+    __syncthreads();
+
+    int bw0 = (j < W && s_a[tid] < s_b[tid]) ? 1 : 0;
+    int bw1 = (j < W && s_a[tid] <= s_b[tid]) ? 1 : 0;
+    s_state[tid] = bw0 | (bw1 << 1);
+    __syncthreads();
+    for (int stride = 1; stride < CS_TILE; stride <<= 1)
+    {
+        int combined = (tid >= stride) ? bar_cs_combine(s_state[tid - stride], s_state[tid])
+                                       : s_state[tid];
+        __syncthreads();
+        s_state[tid] = combined;
+        __syncthreads();
+    }
+    int prefix_excl = (tid == 0) ? 2 : s_state[tid - 1];
+    int bin = (prefix_excl >> tile_bin_v) & 1;
+
+    if (j < W)
+    {
+        int64_t d = (int64_t)s_a[tid] - (int64_t)s_b[tid] - bin;
+        out[(size_t)cand * so + j] = (Data64)((d < 0) ? d + (1LL << LIMB_BITS) : d);
+    }
+}
+
+// Copia os out_limbs baixos de r (W limbs) → out (zero-extende se preciso).
+__global__ static void bar_copy_out(
+    Data64 *__restrict__ out, const Data64 *__restrict__ r,
+    int out_limbs, int W, int n_batch)
+{
+    int cand = blockIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cand >= n_batch || j >= out_limbs)
+        return;
+    out[(size_t)cand * out_limbs + j] = (j < W) ? r[(size_t)cand * W + j] : 0ULL;
 }
 
 // ── helpers GMP específicos ───────────────────────────────────────────────────
@@ -156,10 +266,8 @@ void BatchModCtx::precompute_reduction(const std::vector<uint64_t> &N_all)
     // μ_i = floor(b^{2·bar_k_i}/N_i) (k_i+1 limbs, zero-pad a bar_W1) → NTT(μ).
     const size_t w1b = (size_t)n_batch * bar_W1 * sizeof(Data64);
     CU(cudaMalloc(&d_ntt_mu, pb));
-    CU(cudaMalloc(&d_bar_a1, w1b));
-    CU(cudaMalloc(&d_bar_q, w1b));
-    CU(cudaMalloc(&d_bar_q2, sb));
-    CU(cudaMalloc(&d_bar_qn, sb));
+    CU(cudaMalloc(&d_bar_w1, w1b));
+    CU(cudaMalloc(&d_bar_prod, sb));
 
     std::vector<uint64_t> mu_all((size_t)n_batch * bar_W1, 0);
     for (int i = 0; i < n_batch; i++)
@@ -171,16 +279,23 @@ void BatchModCtx::precompute_reduction(const std::vector<uint64_t> &N_all)
     ntt.ntt_A(d_mu_tmp, bar_W1);
     CU(cudaMemcpy(d_ntt_mu, ntt.d_buf_A, pb, cudaMemcpyDeviceToDevice));
     CU(cudaFree(d_mu_tmp));
+
+    // Buffers do finalize tileado (subtração T−qn e cond_sub de N): largura W1.
+    // O borrow_in é resolvido dentro do apply (fundido), então não há d_cs_tile_bin.
+    n_cs_tiles = (bar_W1 + CS_TILE - 1) / CS_TILE;
+    const size_t csb = (size_t)n_batch * n_cs_tiles * sizeof(int);
+    CU(cudaMalloc(&d_cs_tile_cmp, csb));
+    CU(cudaMalloc(&d_cs_tile_bstate, csb));
 }
 
 void BatchModCtx::free_reduction()
 {
     cudaFree(d_bar_k);
     cudaFree(d_ntt_mu);
-    cudaFree(d_bar_a1);
-    cudaFree(d_bar_q);
-    cudaFree(d_bar_q2);
-    cudaFree(d_bar_qn);
+    cudaFree(d_bar_w1);
+    cudaFree(d_bar_prod);
+    cudaFree(d_cs_tile_cmp);
+    cudaFree(d_cs_tile_bstate);
 }
 
 // cond_sub_batch não é usado no Barrett (finalize faz a subtração), mas a função
@@ -201,11 +316,13 @@ void BatchModCtx::reduce_batch(Data64 *d_out, cudaStream_t s)
     const int W1 = bar_W1; // max(bar_k) + 1
     unsigned bw1 = (unsigned)(W1 + thr - 1) / thr;
 
-    // Passo 1: A1 = floor(T / b^{k_i-1}) → W1 limbs; q2 = A1 · μ (NTT) → d_bar_q2.
+    // Passo 1: A1 = floor(T / b^{k_i-1}) → W1 limbs; q2 = A1 · μ (NTT) → d_bar_prod.
     TSTART();
     shift_right_var_batch<<<dim3(bw1, nb), thr, 0, s>>>(
-        d_bar_a1, d_T, d_bar_k, -1, W1, n_sum, n_batch);
-    ntt.ntt_A(d_bar_a1, W1, s);
+        d_bar_w1, d_T, d_bar_k, -1, W1, n_sum, n_batch);
+    TSTOP(perf_cur->bar_shift);
+    TSTART();
+    ntt.ntt_A(d_bar_w1, W1, s);
     TSTOP(perf_cur->red_ntt_tlow);
     TSTART();
     ntt.pmul_ext(d_ntt_mu, s);
@@ -214,14 +331,16 @@ void BatchModCtx::reduce_batch(Data64 *d_out, cudaStream_t s)
     ntt.intt_A(s);
     TSTOP(perf_cur->red_intt_np);
     TSTART();
-    ntt.carry_to_limbs(d_bar_q2, n_sum, s);
+    ntt.carry_to_limbs(d_bar_prod, n_sum, s);
     TSTOP(perf_cur->red_carry_m);
 
-    // Passo 2: q̂ = floor(q2 / b^{k_i+1}) → W1 limbs; qn = q̂ · N (NTT) → d_bar_qn.
+    // Passo 2: q̂ = floor(q2 / b^{k_i+1}) → W1 limbs; qn = q̂ · N (NTT) → d_bar_prod.
     TSTART();
     shift_right_var_batch<<<dim3(bw1, nb), thr, 0, s>>>(
-        d_bar_q, d_bar_q2, d_bar_k, +1, W1, n_sum, n_batch);
-    ntt.ntt_A(d_bar_q, W1, s);
+        d_bar_w1, d_bar_prod, d_bar_k, +1, W1, n_sum, n_batch);
+    TSTOP(perf_cur->bar_shift);
+    TSTART();
+    ntt.ntt_A(d_bar_w1, W1, s);
     TSTOP(perf_cur->red_ntt_m);
     TSTART();
     ntt.pmul_ext(d_ntt_N, s);
@@ -230,18 +349,48 @@ void BatchModCtx::reduce_batch(Data64 *d_out, cudaStream_t s)
     ntt.intt_A(s);
     TSTOP(perf_cur->red_intt_n);
     TSTART();
-    ntt.carry_to_limbs(d_bar_qn, n_sum, s);
+    ntt.carry_to_limbs(d_bar_prod, n_sum, s);
     TSTOP(perf_cur->red_carry_add);
 
-    // Passo 3: out = (T − qn) mod N, com até 2 subtrações condicionais.
+    // Passo 3: out = (T − qn) mod N — finalize tileado paralelo (ver kernels acima).
+    // Sub-passos cronometrados separadamente (campos dedicados em PerfInner):
+    //   (a) r = T − qn        → bar_sub     (incondicional, W1 limbs → d_bar_w1)
+    //   (b) r −= N, até 2×     → bar_condsub (condicional; r_true < 3N, N largura bar_k)
+    //   (c) copia r[0..n_limbs) → bar_copy
+    dim3 grid((unsigned)n_cs_tiles, nb);
+
+    // (a) r = T − qn (qn já normalizado; limbs altos cancelam, borrow_out = 0).
+    //     apply funde a resolução do borrow_in (uncond=1 ⇒ sempre subtrai).
+    TSTART();
+    bar_sub_phase1<<<grid, CS_TILE, 0, s>>>(
+        d_T, n_sum, d_bar_prod, n_sum, nullptr, W1,
+        d_cs_tile_cmp, d_cs_tile_bstate, n_batch);
+    bar_sub_apply<<<grid, CS_TILE, 0, s>>>(
+        d_bar_w1, W1, d_T, n_sum, d_bar_prod, n_sum, nullptr, W1,
+        d_cs_tile_cmp, d_cs_tile_bstate, /*uncond=*/1, n_batch);
+    TSTOP(perf_cur->bar_sub);
+
+    // (b) até 2 subtrações condicionais de N (in-place em r = d_bar_w1).
+    TSTART();
+    for (int it = 0; it < 2; it++)
+    {
+        bar_sub_phase1<<<grid, CS_TILE, 0, s>>>(
+            d_bar_w1, W1, d_N, n_limbs, d_bar_k, W1,
+            d_cs_tile_cmp, d_cs_tile_bstate, n_batch);
+        bar_sub_apply<<<grid, CS_TILE, 0, s>>>(
+            d_bar_w1, W1, d_bar_w1, W1, d_N, n_limbs, d_bar_k, W1,
+            d_cs_tile_cmp, d_cs_tile_bstate, /*uncond=*/0, n_batch);
+    }
+    TSTOP(perf_cur->bar_condsub);
+
+    // (c) out = r[0..n_limbs).
     TSTART();
     {
-        const int fthr = 64;
-        unsigned fb = (unsigned)(n_batch + fthr - 1) / fthr;
-        barrett_finalize<<<fb, fthr, 0, s>>>(
-            d_out, d_T, d_bar_qn, d_N, d_bar_q, d_bar_k, W1, n_limbs, n_sum, n_batch);
+        const int cthr = MR_THR_COPY;
+        dim3 cgrid((unsigned)(n_limbs + cthr - 1) / cthr, nb);
+        bar_copy_out<<<cgrid, cthr, 0, s>>>(d_out, d_bar_w1, n_limbs, W1, n_batch);
     }
-    TSTOP(perf_cur->cond_sub);
+    TSTOP(perf_cur->bar_copy);
 }
 
 #endif // MOD_RED_BARRETT

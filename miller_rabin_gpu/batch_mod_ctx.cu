@@ -91,11 +91,11 @@ BatchModCtx::BatchModCtx(const std::vector<uint64_t> &N_all, int n_limbs_, int n
     const size_t pb = (size_t)n_batch * padded * sizeof(Data64);
     const size_t sb = (size_t)n_batch * n_sum * sizeof(Data64);
 
-    // Buffers comuns a todos os backends.
+    // Buffers comuns a todos os backends. (d_m é exclusivo do Montgomery e é
+    // alocado em precompute_reduction; não desperdiça padded-bytes no Barrett.)
     CU(cudaMalloc(&d_N, nb));
     CU(cudaMalloc(&d_ntt_N, pb));
     CU(cudaMalloc(&d_T, sb));
-    CU(cudaMalloc(&d_m, pb));
     CU(cudaMalloc(&d_one_res, nb));
     CU(cudaMalloc(&d_Nm1_res, nb));
 
@@ -148,7 +148,6 @@ BatchModCtx::~BatchModCtx()
     cudaFree(d_N);
     cudaFree(d_ntt_N);
     cudaFree(d_T);
-    cudaFree(d_m);
     cudaFree(d_one_res);
     cudaFree(d_Nm1_res);
     free_reduction();

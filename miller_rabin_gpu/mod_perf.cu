@@ -46,10 +46,12 @@ void BatchModCtx::print_perf(double app_total_ms,
 #if MOD_REDUCTION_ALG == MOD_RED_BARRETT
         // Barrett: red_* reaproveitados → q2 = A1·μ e qn = q̂·N; cond_sub = finalize.
         Node reducao = G("reducao Barrett", {
+                                                L("shift (A1,q)", &p.bar_shift),
                                                 G("q2 = A1.mu", {L("ntt(A1)", &p.red_ntt_tlow), L("pmul(mu)", &p.red_pmul_np), L("intt(q2)", &p.red_intt_np), L("carry(q2)", &p.red_carry_m)}),
                                                 G("qn = q.N", {L("ntt(q)", &p.red_ntt_m), L("pmul(N)", &p.red_pmul_n), L("intt(qn)", &p.red_intt_n), L("carry(qn)", &p.red_carry_add)}),
                                             });
-        return G(name, {produto, reducao, L("barrett_finalize", &p.cond_sub)});
+        Node finalize = G("barrett_finalize", {L("sub (T-qn)", &p.bar_sub), L("cond_sub N (2x)", &p.bar_condsub), L("copy_out", &p.bar_copy)});
+        return G(name, {produto, reducao, finalize});
 #else
         Node reducao = G("reducao Montgomery", {
                                                    G("Multiplicacao", {L("ntt_Tlow", &p.red_ntt_tlow), L("pmul_Np", &p.red_pmul_np), L("intt_Np", &p.red_intt_np), L("carry_m", &p.red_carry_m), L("ntt_m", &p.red_ntt_m), L("pmul_N", &p.red_pmul_n), L("intt_N", &p.red_intt_n)}),
@@ -175,9 +177,15 @@ void BatchModCtx::print_perf(double app_total_ms,
     float prod_t = 0;
 #endif
     float carry_t = sumc({&all.carry_product, &all.red_carry_m, &all.red_carry_add});
+#if MOD_REDUCTION_ALG == MOD_RED_BARRETT
+    float add_t = all.bar_sub.ms;
+    float shift_t = all.bar_condsub.ms;
+    float cs_t = all.bar_copy.ms;
+#else
     float add_t = all.red_vadd.ms;
     float shift_t = all.red_shift.ms;
     float cs_t = all.cond_sub.ms;
+#endif
     auto crow = [&](const char *name, float ms)
     {
         if (ms > 0)
@@ -187,11 +195,14 @@ void BatchModCtx::print_perf(double app_total_ms,
     crow("NTT/INTT", ntt_t);
     crow("pointwise (pmul)", pw_t);
     crow("carry", carry_t);
+#if MOD_REDUCTION_ALG == MOD_RED_BARRETT
+    crow("shift (var)", all.bar_shift.ms);
+    crow("finalize: sub (T-qn)", add_t);
+    crow("finalize: cond_sub N", shift_t);
+    crow("finalize: copy_out", cs_t);
+#else
     crow("soma (vadd)", add_t);
     crow("shift", shift_t);
-#if MOD_REDUCTION_ALG == MOD_RED_BARRETT
-    crow("barrett_finalize", cs_t);
-#else
     crow("cond_sub", cs_t);
 #endif
     crow("produto direto", prod_t);

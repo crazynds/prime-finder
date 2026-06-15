@@ -19,6 +19,7 @@ set(MR_THR_PMUL        256)
 set(MR_THR_REDUCE      256)
 set(MR_THR_SELECT_WIN  256)
 set(MR_THR_CHECK       256)
+set(MR_THR_COPY        128)
 set(MR_CARRY_INTER_THR  32)
 
 # Algoritmo de carry: CARRY_ALG_SEQUENTIAL | CARRY_ALG_SINGLE_TILE | CARRY_ALG_MULTI_TILE | CARRY_ALG_PREFIX_SCAN
@@ -27,8 +28,8 @@ set(CARRY_NORM_ALG CARRY_ALG_SINGLE_TILE)
 # Tamanho do tile de carry
 set(MR_CARRY_TILE 32)
 
-# Tile da subtração condicional
-set(MR_CS_TILE 256)
+# Tile usado para subtração
+set(MR_SUB_TILE 256)
 
 # Intervalo mínimo entre updates da barra de progresso (ms)
 set(MR_PROGRESS_INTERVAL_MS 2000)
@@ -44,7 +45,7 @@ set(MONT_MUL_ALG MONT_MUL_ALG_NTT)
 #   MOD_RED_MONTGOMERY       — REDC (forma de trabalho Montgomery). Padrão.
 #   MOD_RED_BARRETT          — Redução de Barrett (forma de trabalho = resíduo plano).
 #   MOD_RED_BURNIKEL_ZIEGLER — Divisão D&C (NÃO implementado; erro de compilação).
-set(MOD_REDUCTION_ALG MOD_RED_MONTGOMERY)
+set(MOD_REDUCTION_ALG MOD_RED_BARRETT)
 
 # ── GPU-NTT (biblioteca Alisah-Ozcan/GPU-NTT) ─────────────────────────────────
 
