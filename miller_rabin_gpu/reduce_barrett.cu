@@ -348,8 +348,10 @@ void BatchModCtx::reduce_batch(Data64 *d_out, cudaStream_t s)
     TSTART();
     ntt.intt_A(s);
     TSTOP(perf_cur->red_intt_n);
+    // O finalize só usa os W1 limbs baixos de qn (os altos cancelam em T−qn), e o
+    // carry propaga só de baixo p/ cima ⇒ basta normalizar W1 limbs, não n_sum.
     TSTART();
-    ntt.carry_to_limbs(d_bar_prod, n_sum, s);
+    ntt.carry_to_limbs(d_bar_prod, W1, s);
     TSTOP(perf_cur->red_carry_add);
 
     // Passo 3: out = (T − qn) mod N — finalize tileado paralelo (ver kernels acima).
