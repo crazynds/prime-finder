@@ -167,7 +167,11 @@ add_executable(bench_mr_gpu
     miller_rabin_gpu/bench_ops.cu
     miller_rabin_gpu/miller_rabin_runner.cu
     miller_rabin_gpu/bigint_ntt.cu
-    miller_rabin_gpu/montgomery.cu
+    miller_rabin_gpu/carry_norm.cu
+    miller_rabin_gpu/batch_mod_ctx.cu
+    miller_rabin_gpu/mod_perf.cu
+    miller_rabin_gpu/reduce_montgomery.cu
+    miller_rabin_gpu/reduce_barrett.cu
 )
 
 target_include_directories(bench_mr_gpu PRIVATE

@@ -20,7 +20,11 @@ Adicione ao seu `CMakeLists.txt` os arquivos fonte e o include path:
 target_sources(seu_target PRIVATE
     miller_rabin_gpu/miller_rabin_runner.cu
     miller_rabin_gpu/bigint_ntt.cu
-    miller_rabin_gpu/montgomery.cu
+    miller_rabin_gpu/carry_norm.cu
+    miller_rabin_gpu/batch_mod_ctx.cu
+    miller_rabin_gpu/mod_perf.cu
+    miller_rabin_gpu/reduce_montgomery.cu
+    miller_rabin_gpu/reduce_barrett.cu
 )
 target_include_directories(seu_target PRIVATE miller_rabin_gpu/)
 target_link_libraries(seu_target PRIVATE GPUNTT::ntt CUDA::cudart ${GMP_LIB})
@@ -30,7 +34,7 @@ set_target_properties(seu_target PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 Nos seus arquivos, inclua:
 
 ```cpp
-#include "montgomery.cuh"
+#include "batch_mod_ctx.cuh"
 #include "miller_rabin_runner.cuh"
 ```
 
@@ -69,9 +73,19 @@ O teste de Miller-Rabin requer decompor `N-1 = 2^s · d` onde `d` é ímpar. O v
 
 ---
 
-## `BatchMontCtx` — Contexto de Montgomery
+## `BatchModCtx` — Contexto de redução modular
 
-Encapsula toda a aritmética modular de Montgomery para um **batch** de candidatos processados simultaneamente na GPU. Todos os candidatos do batch devem ter o mesmo `n_limbs`.
+Encapsula toda a aritmética modular para um **batch** de candidatos processados simultaneamente na GPU. Todos os candidatos do batch devem ter o mesmo `n_limbs`.
+
+O **algoritmo de redução** é escolhido em tempo de compilação via `MOD_REDUCTION_ALG` (em `params.cmake`):
+
+| Valor                      | Forma de trabalho        | Observações                                                            |
+| -------------------------- | ------------------------ | --------------------------------------------------------------------- |
+| `MOD_RED_MONTGOMERY`       | Montgomery (`x·R mod N`) | REDC clássico via NTT. Padrão.                                         |
+| `MOD_RED_BARRETT`          | resíduo plano (`x mod N`)| μ = ⌊b^{2k}/N⌋ pré-computado; 2 multiplicações via NTT + finalize. Exige que todos os candidatos do batch tenham a **mesma magnitude** (mesmo nº de limbs tight de N — vale para candidatos esparsos). |
+| `MOD_RED_BURNIKEL_ZIEGLER` | —                        | **Não implementado** (erro de compilação claro).                      |
+
+A interface abaixo é a mesma para qualquer algoritmo: a "forma de trabalho" muda conforme o backend, mas `to_residue_batch`/`from_residue_batch` sempre convertem de/para o inteiro normal, e `d_one_res`/`d_Nm1_res` guardam `1` e `N-1` na forma de trabalho.
 
 ### Construção
 
@@ -79,7 +93,7 @@ Dois construtores disponíveis:
 
 ```cpp
 // Construtor 1: a partir de limbs pré-computados
-BatchMontCtx mont(N_all, n_limbs, n_batch, device_id = 0);
+BatchModCtx mont(N_all, n_limbs, n_batch, device_id = 0);
 ```
 
 | Parâmetro   | Tipo                      | Descrição                                                               |
@@ -91,7 +105,7 @@ BatchMontCtx mont(N_all, n_limbs, n_batch, device_id = 0);
 
 ```cpp
 // Construtor 2: diretamente de mpz_t — calcula n_limbs automaticamente
-BatchMontCtx mont(numbers, device_id = 0);
+BatchModCtx mont(numbers, device_id = 0);
 ```
 
 | Parâmetro   | Tipo                    | Descrição                              |
@@ -102,20 +116,20 @@ BatchMontCtx mont(numbers, device_id = 0);
 ### Métodos
 
 ```cpp
-// Converte valores do host para forma Montgomery (também no host)
-mont.to_mont_batch(x_all, out_all);
+// Converte valores do host para a forma de trabalho (também no host)
+mont.to_residue_batch(x_all, out_all);
 
-// Converte de volta: GPU (Montgomery) → host (normal)
-mont.from_mont_batch(d_x, out_all);
+// Converte de volta: GPU (forma de trabalho) → host (normal)
+mont.from_residue_batch(d_x, out_all);
 
-// d_out = d_A * d_B mod N  (GPU, forma Montgomery)
-mont.mont_mul_batch(d_A, d_B, d_out);
+// d_out = d_A * d_B mod N  (GPU, forma de trabalho)
+mont.modmul_batch(d_A, d_B, d_out);
 
-// d_out = d_A^2 mod N  (GPU, forma Montgomery)
-mont.mont_sq_batch(d_A, d_out);
+// d_out = d_A^2 mod N  (GPU, forma de trabalho)
+mont.modsq_batch(d_A, d_out);
 
-// d_passed[t] = 1 se d_r[t] == 1 ou d_r[t] == N-1  (em Montgomery)
-mont.check_passed(d_r_mont, d_passed);
+// d_passed[t] = 1 se d_r[t] == 1 ou d_r[t] == N-1  (na forma de trabalho)
+mont.check_passed(d_r, d_passed);
 ```
 
 ### Campos públicos úteis
@@ -124,8 +138,8 @@ mont.check_passed(d_r_mont, d_passed);
 mont.n_limbs     // limbs por candidato
 mont.n_batch     // número de candidatos
 mont.d_N         // módulos N na GPU  [n_batch × n_limbs]
-mont.d_one_mont  // to_mont(1) por candidato  [n_batch × n_limbs]
-mont.d_Nm1_mont  // to_mont(N-1) por candidato  [n_batch × n_limbs]
+mont.d_one_res  // 1 na forma de trabalho por candidato  [n_batch × n_limbs]
+mont.d_Nm1_res  // N-1 na forma de trabalho por candidato  [n_batch × n_limbs]
 mont.perf        // contadores de tempo interno; .print() para exibir
 ```
 
@@ -142,7 +156,7 @@ Computa `a^d mod N` e verifica se o resultado é `±1 mod N`.
 
 ```cpp
 std::vector<bool> gpu_miller_rabin_s1(
-    BatchMontCtx& mont,
+    BatchModCtx& mont,
     const std::vector<uint64_t>& d_all,          // d = (N-1)/2,  flat [n_total × n_limbs]
     const std::vector<uint64_t>& Nm1_all,        // N-1,          flat [n_total × n_limbs]
     int n_total,
@@ -160,7 +174,7 @@ Após computar `a^d`, realiza até `s-1` squarings extras verificando N-1 a cada
 
 ```cpp
 std::vector<bool> gpu_miller_rabin(
-    BatchMontCtx& mont,
+    BatchModCtx& mont,
     const std::vector<uint64_t>& d_all,          // d ímpar onde N-1 = 2^s·d, flat [n_total × n_limbs]
     const std::vector<uint64_t>& Nm1_all,        // N-1,                       flat [n_total × n_limbs]
     int s,
@@ -179,7 +193,7 @@ std::vector<bool> gpu_miller_rabin(
 ## Exemplo completo
 
 ```cpp
-#include "montgomery.cuh"
+#include "batch_mod_ctx.cuh"
 #include "miller_rabin_runner.cuh"
 #include <gmp.h>
 #include <vector>
@@ -217,7 +231,7 @@ bool is_probably_prime(const mpz_t N) {
     mpz_clears(Nm1, d, nullptr);
 
     // Cria contexto e executa
-    BatchMontCtx mont(N_lims, n_limbs, 1);
+    BatchModCtx mont(N_lims, n_limbs, 1);
 
     std::vector<bool> result;
     if (s == 1)
@@ -245,7 +259,7 @@ int main() {
 
 ### Processando múltiplos números em batch
 
-Para melhor performance, agrupe candidatos com o mesmo `n_limbs` em um único `BatchMontCtx`:
+Para melhor performance, agrupe candidatos com o mesmo `n_limbs` em um único `BatchModCtx`:
 
 ```cpp
 int n_batch = (int)candidatos.size();
@@ -257,7 +271,7 @@ std::vector<uint64_t> Nm1_all(n_batch * n_limbs, 0);
 std::vector<uint64_t> d_all  (n_batch * n_limbs, 0);
 // ... preenche cada candidato em N_all[i*n_limbs .. (i+1)*n_limbs]
 
-BatchMontCtx mont(N_all, n_limbs, n_batch);
+BatchModCtx mont(N_all, n_limbs, n_batch);
 auto alive = gpu_miller_rabin_s1(mont, d_all, Nm1_all, n_batch, DEFAULT_WITNESSES, "batch");
 
 for (int i = 0; i < n_batch; i++)
@@ -299,10 +313,16 @@ Todos os parâmetros de tuning estão centralizados em `config.h`. Redefina-os a
 config.h                — Parâmetros configuráveis (WINDOW_BITS, BATCH_SIZE, etc.)
 miller_rabin_runner.cuh   — API pública: gpu_miller_rabin_s1, gpu_miller_rabin
 miller_rabin_runner.cu    — Implementação dos kernels de exponenciação
-montgomery.cuh            — API pública: BatchMontCtx
-montgomery.cu             — Kernels CUDA de aritmética de Montgomery
-bigint_ntt.cuh            — BigIntNTTBatch (usado internamente pelo Montgomery)
-bigint_ntt.cu             — Kernels NTT
+batch_mod_ctx.cuh         — API pública: BatchModCtx (struct + interface)
+batch_mod_ctx.cu          — Núcleo comum: ctor/dtor, to/from_residue, modmul/modsq
+mod_perf.cu               — Impressão da árvore de perfil (BatchModCtx::print_perf)
+reduce_montgomery.cu      — Redução de Montgomery (REDC) + cond_sub  [MOD_RED_MONTGOMERY]
+reduce_barrett.cu         — Redução de Barrett (μ pré-NTT + finalize) [MOD_RED_BARRETT]
+gmp_helpers.cuh           — Conversões host limbs↔mpz_t
+mod_internal.cuh          — Macros internas (CU, TSTART/TSTOP)
+bigint_ntt.cuh            — BigIntNTTBatch (multiplicação NTT, usado internamente)
+bigint_ntt.cu             — Kernels NTT + schoolbook
+carry_norm.cu             — Algoritmos de normalização de carry (CARRY_NORM_ALG)
 correctness_tests.cuh     — run_correctness_tests(), run_known_prime_tests(),
                             run_general_s_prime_tests()  (testes opcionais)
 ```

@@ -87,10 +87,10 @@ struct PerfCtrs {
 // Aloca e desaloca d_table internamente.
 
 static void window_exp_loop(
-        BatchMontCtx& mont,
+        BatchModCtx& mont,
         const std::vector<uint64_t>& exp_all,
         Data64*& d_r,
-        Data64* d_one_mont_h,
+        Data64* d_one_res_h,
         Data64* d_base,
         Data64*& d_scratch,
         Data64* d_cur_mul,
@@ -112,10 +112,10 @@ static void window_exp_loop(
     auto elapsed_ms = [&]() { float ms=0; CU(cudaEventSynchronize(ev1)); CU(cudaEventElapsedTime(&ms,ev0,ev1)); return ms; };
 
     CU(cudaEventRecord(ev0));
-    CU(cudaMemcpy(d_table, d_one_mont_h, total_bytes, cudaMemcpyDeviceToDevice));
+    CU(cudaMemcpy(d_table, d_one_res_h, total_bytes, cudaMemcpyDeviceToDevice));
     CU(cudaMemcpy(d_table + (size_t)1 * n_total * n, d_base, total_bytes, cudaMemcpyDeviceToDevice));
     for (int w = 2; w < WINDOW_SIZE; w++)
-        mont.mont_mul_batch(d_table + (size_t)(w-1)*n_total*n, d_base, d_table + (size_t)w*n_total*n);
+        mont.modmul_batch(d_table + (size_t)(w-1)*n_total*n, d_base, d_table + (size_t)w*n_total*n);
     CU(cudaEventRecord(ev1));
     perf.table_ms += elapsed_ms();
 
@@ -152,13 +152,14 @@ static void window_exp_loop(
 
     auto t_start      = hrc::now();
     auto t_last_print = t_start;
+    int  last_print_bits = 0;
 
     for (int win = 0; win < n_windows; win++) {
         int i = start_win - win * WINDOW_BITS;
 
         auto t_sq0 = hrc::now();
         for (int sq = 0; sq < WINDOW_BITS; sq++) {
-            mont.mont_sq_batch(d_r, d_scratch);
+            mont.modsq_batch(d_r, d_scratch);
             std::swap(d_r, d_scratch);
         }
         perf.sq_ms    += std::chrono::duration<float,std::milli>(hrc::now()-t_sq0).count();
@@ -167,7 +168,7 @@ static void window_exp_loop(
         if (any_nonzero[win]) {
             auto t_mul0 = hrc::now();
             select_window_kernel<<<grid_sel, thr>>>(d_cur_mul, d_table, d_exp_dev, i, WINDOW_BITS, n, n_total);
-            mont.mont_mul_batch(d_r, d_cur_mul, d_scratch);
+            mont.modmul_batch(d_r, d_cur_mul, d_scratch);
             std::swap(d_r, d_scratch);
             perf.mul_ms += std::chrono::duration<float,std::milli>(hrc::now()-t_mul0).count();
             perf.mul_calls++;
@@ -178,15 +179,20 @@ static void window_exp_loop(
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now-t_last_print).count() >= MR_PROGRESS_INTERVAL_MS
                 || win == n_windows-1)
             {
-                t_last_print = now;
                 int done_bits  = (win+1) * WINDOW_BITS;
                 int total_bits = n_windows * WINDOW_BITS;
                 double ms = std::chrono::duration_cast<std::chrono::milliseconds>(now-t_start).count();
+                // Taxa instantânea: tempo/bits desde a última impressão (não a média
+                // acumulada, que seria distorcida pelo warmup das primeiras iterações).
+                double dms   = std::chrono::duration<double,std::milli>(now-t_last_print).count();
+                int    dbits = done_bits - last_print_bits;
                 printf("\r    bit %d/%d  %3d%%  %s  %s/iter   ",
                        done_bits, total_bits, done_bits*100/total_bits,
                        fmt_time_ms(ms).c_str(),
-                       fmt_time_ms(done_bits>0 ? ms/done_bits : 0.0).c_str());
+                       fmt_time_ms(dbits>0 ? dms/dbits : 0.0).c_str());
                 fflush(stdout);
+                t_last_print   = now;
+                last_print_bits = done_bits;
             }
         }
     }
@@ -198,7 +204,7 @@ static void window_exp_loop(
 
 // ── Imprime relatório de performance ─────────────────────────────────────────
 
-static void print_perf(const PerfCtrs& perf, BatchMontCtx& mont)
+static void print_perf(const PerfCtrs& perf, BatchModCtx& mont)
 {
     float window_ms = perf.sq_ms + perf.mul_ms;
     float total_ms  = window_ms + perf.check_ms + perf.setup_ms + perf.memcpy_ms + perf.table_ms;
@@ -224,7 +230,7 @@ static void print_perf(const PerfCtrs& perf, BatchMontCtx& mont)
     // anotação de banda (GB/s).
     char gbps[32];
     snprintf(gbps, sizeof(gbps), "(%.2f GB/s)", memcpy_gbps);
-    std::vector<BatchMontCtx::HostPhase> host = {
+    std::vector<BatchModCtx::HostPhase> host = {
         {"pre-computo tabela", perf.table_ms, ""},
         {"setup CPU (to_mont)", perf.setup_ms, ""},
         {"check + memcpy", perf.check_ms, ""},
@@ -241,7 +247,7 @@ struct WitnessBuffers {
     uint8_t* d_passed;
     int n_total, n;
 
-    WitnessBuffers(BatchMontCtx& mont, const std::vector<uint64_t>& exp_all,
+    WitnessBuffers(BatchModCtx& mont, const std::vector<uint64_t>& exp_all,
                    int n_total_)
         : n_total(n_total_), n(mont.n_limbs)
     {
@@ -259,7 +265,7 @@ struct WitnessBuffers {
         std::vector<uint64_t> one_all((size_t)n_total * n, 0);
         for (int t = 0; t < n_total; t++) one_all[t*n] = 1;
         std::vector<uint64_t> one_mont;
-        mont.to_mont_batch(one_all, one_mont);
+        mont.to_residue_batch(one_all, one_mont);
         CU(cudaMemcpy(d_one, one_mont.data(), tb, cudaMemcpyHostToDevice));
     }
 
@@ -274,7 +280,7 @@ struct WitnessBuffers {
 // Otimizado para s=1: computa a^d onde d=(N-1)/2 e verifica se r == ±1 (mod N).
 
 std::vector<bool> gpu_miller_rabin_s1(
-        BatchMontCtx& mont,
+        BatchModCtx& mont,
         const std::vector<uint64_t>& exp_all,
         const std::vector<uint64_t>& Nm1_all,
         int n_total,
@@ -315,7 +321,7 @@ std::vector<bool> gpu_miller_rabin_s1(
             w_all[t*n+1] = (witnesses[wi] >> LIMB_BITS) & LIMB_MASK;
         }
         std::vector<uint64_t> base_mont;
-        mont.to_mont_batch(w_all, base_mont);
+        mont.to_residue_batch(w_all, base_mont);
         CU(cudaEventRecord(ev1));
         perf.setup_ms += elapsed_ms();
 
@@ -358,7 +364,7 @@ std::vector<bool> gpu_miller_rabin_s1(
 // Após computar r = a^d, faz até s-1 squarings extras verificando N-1.
 
 std::vector<bool> gpu_miller_rabin(
-        BatchMontCtx& mont,
+        BatchModCtx& mont,
         const std::vector<uint64_t>& exp_all,
         const std::vector<uint64_t>& Nm1_all,
         int s,
@@ -407,7 +413,7 @@ std::vector<bool> gpu_miller_rabin(
             w_all[t*n+1] = (witnesses[wi] >> LIMB_BITS) & LIMB_MASK;
         }
         std::vector<uint64_t> base_mont;
-        mont.to_mont_batch(w_all, base_mont);
+        mont.to_residue_batch(w_all, base_mont);
         for (int t = 0; t < n_total; t++) alive_h[t] = round_alive[t] ? 1 : 0;
         CU(cudaEventRecord(ev1));
         perf.setup_ms += elapsed_ms();
@@ -443,11 +449,11 @@ std::vector<bool> gpu_miller_rabin(
 
         // Squarings extras: verifica r^(2^i) == N-1 para i = 1..s-1
         for (int sq = 1; sq < s; sq++) {
-            mont.mont_sq_batch(buf.d_r, buf.d_scratch);
+            mont.modsq_batch(buf.d_r, buf.d_scratch);
             std::swap(buf.d_r, buf.d_scratch);
 
             // Marca 2 quem ainda é vivo (alive==1) e r == N-1
-            check_equals_kernel<<<n_total, MR_THR_CHECK>>>(buf.d_r, mont.d_Nm1_mont, d_alive, n, n_total);
+            check_equals_kernel<<<n_total, MR_THR_CHECK>>>(buf.d_r, mont.d_Nm1_res, d_alive, n, n_total);
         }
 
         CU(cudaMemcpy(alive_h.data(), d_alive, n_total, cudaMemcpyDeviceToHost));

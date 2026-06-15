@@ -40,6 +40,12 @@ set(MR_ADVANCED_MONITOR ON)
 # Algoritmo de multiplicação big-integer: MONT_MUL_ALG_NTT | MONT_MUL_ALG_SCHOOLBOOK
 set(MONT_MUL_ALG MONT_MUL_ALG_NTT)
 
+# Algoritmo de redução modular usado em modmul/modsq:
+#   MOD_RED_MONTGOMERY       — REDC (forma de trabalho Montgomery). Padrão.
+#   MOD_RED_BARRETT          — Redução de Barrett (forma de trabalho = resíduo plano).
+#   MOD_RED_BURNIKEL_ZIEGLER — Divisão D&C (NÃO implementado; erro de compilação).
+set(MOD_REDUCTION_ALG MOD_RED_MONTGOMERY)
+
 # ── GPU-NTT (biblioteca Alisah-Ozcan/GPU-NTT) ─────────────────────────────────
 
 # Ativa tabelas de kernel otimizadas para RTX 4090 (Compute Capability 8.9).

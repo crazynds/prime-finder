@@ -57,7 +57,7 @@ static std::vector<bool> test_batch(
     int bsz = (int)cands.size();
     int s   = cands[0]->s;
 
-    BatchMontCtx mont(N_batch, n_limbs, bsz);
+    BatchModCtx mont(N_batch, n_limbs, bsz);
     if (s == 1)
         return gpu_miller_rabin_s1(mont, d_batch, Nm1_batch, bsz, DEFAULT_WITNESSES, label, show_report, show_progress);
     else
@@ -97,12 +97,20 @@ int main(int argc, char* argv[])
 #else
         const char* mul_alg = "SCHOOLBOOK";
 #endif
+#if   MOD_REDUCTION_ALG == MOD_RED_MONTGOMERY
+        const char* mod_red_alg = "MONTGOMERY";
+#elif MOD_REDUCTION_ALG == MOD_RED_BARRETT
+        const char* mod_red_alg = "BARRETT";
+#else
+        const char* mod_red_alg = "BURNIKEL_ZIEGLER";
+#endif
         printf("╔══════════════════════════════════════════════════╗\n");
         printf("║  Configuração de build                           ║\n");
         printf("╚══════════════════════════════════════════════════╝\n");
         printf("  window_bits       %d\n",   MR_WINDOW_BITS);
         printf("  batch_size        %d\n",   MR_BATCH_SIZE);
         printf("  mont_mul_alg      %s\n",   mul_alg);
+        printf("  mod_reduction_alg %s\n",   mod_red_alg);
         printf("  carry_norm_alg    %s\n",   carry_alg);
         printf("  carry_tile        %d\n",   MR_CARRY_TILE);
         printf("  thr_load          %d\n",   MR_THR_LOAD);
@@ -156,7 +164,7 @@ int main(int argc, char* argv[])
         for (int i = 0; i < bsz_test; i++) test_cands.push_back(&cands[i].N_cand);
         std::vector<uint64_t> N_test, Nm1_test, d_test;
         pack_batch(test_cands, n_limbs, N_test, Nm1_test, d_test);
-        BatchMontCtx mont_test(N_test, n_limbs, bsz_test);
+        BatchModCtx mont_test(N_test, n_limbs, bsz_test);
         run_correctness_tests(mont_test, N_test);
         run_known_prime_tests();
         run_general_s_prime_tests();

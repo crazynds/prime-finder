@@ -83,3 +83,9 @@
 ------------------------------------------------------*/
 
 #define MONT_MUL_ALG @MONT_MUL_ALG@
+
+/** --------------------------------------------------
+      Algoritmo de redução modular (modmul / modsq)
+------------------------------------------------------*/
+
+#define MOD_REDUCTION_ALG @MOD_REDUCTION_ALG@

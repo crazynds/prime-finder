@@ -6,7 +6,7 @@
 // Ativado com a flag --bench-ops no bench_mr_gpu.
 
 #include "bench_ops.cuh"
-#include "montgomery.cuh"
+#include "batch_mod_ctx.cuh"
 #include "miller_rabin_runner.cuh"
 #include "time_format.h"
 #include "config.h"
@@ -116,7 +116,7 @@ static BenchResult bench_gmp_sq_only(int n_bits, bool is_last)
     return {ops / elapsed, ops, elapsed};
 }
 
-// GMP: mpz_mul + mpz_mod — equivalente ao mont_mul_batch do GPU (mul + redução mod N).
+// GMP: mpz_mul + mpz_mod — equivalente ao modmul_batch do GPU (mul + redução mod N).
 static BenchResult bench_gmp_mul(int n_bits, bool is_last)
 {
     __mpz_struct A, B, N, C;
@@ -146,7 +146,7 @@ static BenchResult bench_gmp_mul(int n_bits, bool is_last)
     return {ops / elapsed, ops, elapsed};
 }
 
-// GMP: mpz_mul(self) + mpz_mod — equivalente ao mont_sq_batch do GPU.
+// GMP: mpz_mul(self) + mpz_mod — equivalente ao modsq_batch do GPU.
 static BenchResult bench_gmp_sq(int n_bits, bool is_last)
 {
     __mpz_struct A, N, C;
@@ -205,15 +205,15 @@ static BenchResult bench_gpu_mul_only(int n_bits, bool is_last)
     BenchResult res = {};
     try
     {
-        BatchMontCtx ctx(nums, 0);
+        BatchModCtx ctx(nums, 0);
         size_t nb = (size_t)N_BATCH * ctx.n_limbs * sizeof(Data64);
         size_t nb_out = (size_t)N_BATCH * ctx.n_sum * sizeof(Data64);
         Data64 *d_A, *d_B, *d_out;
         cudaMalloc(&d_A, nb);
         cudaMalloc(&d_B, nb);
         cudaMalloc(&d_out, nb_out);
-        cudaMemcpy(d_A, ctx.d_one_mont, nb, cudaMemcpyDeviceToDevice);
-        cudaMemcpy(d_B, ctx.d_Nm1_mont, nb, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_A, ctx.d_one_res, nb, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_B, ctx.d_Nm1_res, nb, cudaMemcpyDeviceToDevice);
         cudaDeviceSynchronize();
 
         long long rounds = 0;
@@ -250,13 +250,13 @@ static BenchResult bench_gpu_sq_only(int n_bits, bool is_last)
     BenchResult res = {};
     try
     {
-        BatchMontCtx ctx(nums, 0);
+        BatchModCtx ctx(nums, 0);
         size_t nb = (size_t)N_BATCH * ctx.n_limbs * sizeof(Data64);
         size_t nb_out = (size_t)N_BATCH * ctx.n_sum * sizeof(Data64);
         Data64 *d_A, *d_out;
         cudaMalloc(&d_A, nb);
         cudaMalloc(&d_out, nb_out);
-        cudaMemcpy(d_A, ctx.d_one_mont, nb, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_A, ctx.d_one_res, nb, cudaMemcpyDeviceToDevice);
         cudaDeviceSynchronize();
 
         long long rounds = 0;
@@ -292,15 +292,15 @@ static BenchResult bench_gpu_mul(int n_bits, bool is_last)
     BenchResult res = {};
     try
     {
-        BatchMontCtx ctx(nums, 0);
+        BatchModCtx ctx(nums, 0);
 
         size_t nb = (size_t)N_BATCH * ctx.n_limbs * sizeof(Data64);
         Data64 *d_A, *d_B, *d_out;
         cudaMalloc(&d_A, nb);
         cudaMalloc(&d_B, nb);
         cudaMalloc(&d_out, nb);
-        cudaMemcpy(d_A, ctx.d_one_mont, nb, cudaMemcpyDeviceToDevice);
-        cudaMemcpy(d_B, ctx.d_Nm1_mont, nb, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_A, ctx.d_one_res, nb, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_B, ctx.d_Nm1_res, nb, cudaMemcpyDeviceToDevice);
         cudaDeviceSynchronize();
 
         long long rounds = 0;
@@ -308,7 +308,7 @@ static BenchResult bench_gpu_mul(int n_bits, bool is_last)
         double elapsed = 0;
         do
         {
-            ctx.mont_mul_batch(d_A, d_B, d_out);
+            ctx.modmul_batch(d_A, d_B, d_out);
             cudaDeviceSynchronize();
             rounds++;
             elapsed = dsec(hrc::now() - t0).count();
@@ -338,13 +338,13 @@ static BenchResult bench_gpu_sq(int n_bits, bool is_last)
     BenchResult res = {};
     try
     {
-        BatchMontCtx ctx(nums, 0);
+        BatchModCtx ctx(nums, 0);
 
         size_t nb = (size_t)N_BATCH * ctx.n_limbs * sizeof(Data64);
         Data64 *d_A, *d_out;
         cudaMalloc(&d_A, nb);
         cudaMalloc(&d_out, nb);
-        cudaMemcpy(d_A, ctx.d_one_mont, nb, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_A, ctx.d_one_res, nb, cudaMemcpyDeviceToDevice);
         cudaDeviceSynchronize();
 
         long long rounds = 0;
@@ -352,7 +352,7 @@ static BenchResult bench_gpu_sq(int n_bits, bool is_last)
         double elapsed = 0;
         do
         {
-            ctx.mont_sq_batch(d_A, d_out);
+            ctx.modsq_batch(d_A, d_out);
             cudaDeviceSynchronize();
             rounds++;
             elapsed = dsec(hrc::now() - t0).count();
@@ -463,7 +463,7 @@ static BenchResult bench_gpu_mr(int n_bits, bool is_last)
     BenchResult res = {};
     try
     {
-        BatchMontCtx ctx(nums, 0);
+        BatchModCtx ctx(nums, 0);
         int nl = ctx.n_limbs;
 
         // Prepara exp_all = d = (N-1)/2 e Nm1_all = N-1

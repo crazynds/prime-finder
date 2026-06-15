@@ -4,7 +4,7 @@
 // gpu_miller_rabin_s1: otimizado para N-1 = 2*d (s=1, N ≡ 3 mod 4).
 // gpu_miller_rabin:    versão geral para N-1 = 2^s * d, qualquer s >= 1.
 
-#include "montgomery.cuh"
+#include "batch_mod_ctx.cuh"
 #include "config.h"
 #include <vector>
 #define MR_WINDOW_SIZE (1 << MR_WINDOW_BITS)
@@ -26,7 +26,7 @@ __global__ void select_window_kernel(
 // Para números onde N-1 = 2*d (s=1).
 // exp_all: d = (N-1)/2, flat [n_total * n_limbs].
 std::vector<bool> gpu_miller_rabin_s1(
-    BatchMontCtx &mont,
+    BatchModCtx &mont,
     const std::vector<uint64_t> &exp_all,
     const std::vector<uint64_t> &Nm1_all,
     int n_total,
@@ -38,7 +38,7 @@ std::vector<bool> gpu_miller_rabin_s1(
 // Versão geral: N-1 = 2^s * d.
 // exp_all: d (ímpar), s: número de fatores de 2 em N-1.
 std::vector<bool> gpu_miller_rabin(
-    BatchMontCtx &mont,
+    BatchModCtx &mont,
     const std::vector<uint64_t> &exp_all,
     const std::vector<uint64_t> &Nm1_all,
     int s,
