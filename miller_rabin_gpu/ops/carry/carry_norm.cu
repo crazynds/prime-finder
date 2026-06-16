@@ -4,7 +4,7 @@
 // que os lançam. Os kernels de transformada NTT propriamente ditos ficam em bigint_ntt.cu.
 
 #include "config.h"
-#include "bigint_ntt.cuh"
+#include "ops/mul/ntt_merge.cuh"
 #include <cstdio>
 
 // ── kernels de soma (suporte ao carry) ────────────────────────────────────────

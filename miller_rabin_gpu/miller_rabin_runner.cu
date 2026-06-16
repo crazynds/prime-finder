@@ -1,7 +1,7 @@
 // miller_rabin_runner.cu
 #include "miller_rabin_runner.cuh"
-#include "bigint_ntt.cuh"
-#include "time_format.h"
+#include "ops/mul/ntt_merge.cuh"
+#include "helpers/time_format.h"
 #include <cstdio>
 #include <chrono>
 #include <algorithm>
@@ -224,7 +224,6 @@ static void print_perf(const PerfCtrs& perf, BatchModCtx& mont)
     printf("  └─ mul + select_win     %12s  %5.1f%%  (%ld jan, %s/jan)\n",
            fmt_time_ms(perf.mul_ms).c_str(), pct(perf.mul_ms), perf.mul_calls,
            fmt_time_ms(perf.mul_calls > 0 ? perf.mul_ms/perf.mul_calls : 0.0).c_str());
-    printf("\n  Breakdown da aplicacao (arvore unificada):\n");
 
     // Fases de host (entram na árvore sob "setup / host"). Só o memcpy carrega
     // anotação de banda (GB/s).

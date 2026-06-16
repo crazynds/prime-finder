@@ -1,5 +1,5 @@
 #pragma once
-// time_format.h — formatação de tempo escolhendo automaticamente a melhor unidade
+// helpers/time_format.h — formatação de tempo escolhendo automaticamente a melhor unidade
 // (min / s / ms / µs / ns). Usado por todos os prints de tempo do projeto.
 
 #include <string>

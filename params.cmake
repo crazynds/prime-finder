@@ -41,6 +41,12 @@ set(MR_ADVANCED_MONITOR ON)
 # Algoritmo de multiplicação big-integer: MONT_MUL_ALG_NTT | MONT_MUL_ALG_SCHOOLBOOK
 set(MONT_MUL_ALG MONT_MUL_ALG_NTT)
 
+# Backend de multiplicação big-int (compile-time). Define qual implementação a
+# classe Multiplier resolve (ver ops/mul/multiplier.cuh). As reduções não mudam.
+#   MUL_NTT_MERGE — GPU-NTT algoritmo "merge" (padrão).
+#   MUL_NTT_4STEP — GPU-NTT algoritmo "4step" (radix; transposes internos).
+set(MUL_BACKEND MUL_NTT_MERGE)
+
 # Algoritmo de redução modular usado em modmul/modsq:
 #   MOD_RED_MONTGOMERY       — REDC (forma de trabalho Montgomery). Padrão.
 #   MOD_RED_BARRETT          — Redução de Barrett (forma de trabalho = resíduo plano).

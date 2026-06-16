@@ -164,14 +164,16 @@ endif()
 
 add_executable(bench_mr_gpu
     miller_rabin_gpu/bench_mr_gpu.cu
-    miller_rabin_gpu/bench_ops.cu
+    miller_rabin_gpu/helpers/bench_ops.cu
     miller_rabin_gpu/miller_rabin_runner.cu
-    miller_rabin_gpu/bigint_ntt.cu
-    miller_rabin_gpu/carry_norm.cu
+    miller_rabin_gpu/ops/mul/ntt_merge.cu
+    miller_rabin_gpu/ops/carry/carry_norm.cu
+    miller_rabin_gpu/ops/shift/shift.cu
+    miller_rabin_gpu/ops/sub/sub.cu
     miller_rabin_gpu/batch_mod_ctx.cu
-    miller_rabin_gpu/mod_perf.cu
-    miller_rabin_gpu/reduce_montgomery.cu
-    miller_rabin_gpu/reduce_barrett.cu
+    miller_rabin_gpu/helpers/mod_perf.cu
+    miller_rabin_gpu/reductions/montgomery.cu
+    miller_rabin_gpu/reductions/barrett.cu
 )
 
 target_include_directories(bench_mr_gpu PRIVATE

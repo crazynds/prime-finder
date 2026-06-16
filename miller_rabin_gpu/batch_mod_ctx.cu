@@ -3,11 +3,11 @@
 // Contém o que independe do algoritmo de redução: construção/destruição, conversão
 // de/para a forma de trabalho (delegando a mod_residue_forward/backward), check_passed,
 // e os drivers modmul/modsq (produto polinomial → reduce_batch). A redução em si vive
-// em reduce_montgomery.cu / reduce_barrett.cu; o relatório de perfil em mod_perf.cu.
+// em reductions/montgomery.cu / reductions/barrett.cu; o relatório em helpers/mod_perf.cu.
 
 #include "batch_mod_ctx.cuh"
-#include "gmp_helpers.cuh"
-#include "mod_internal.cuh"
+#include "helpers/gmp_helpers.cuh"
+#include "helpers/timers.cuh"
 #include <vector>
 #include <algorithm>
 #include <gmp.h>
@@ -50,7 +50,6 @@ __global__ static void check_passed_kernel(
 
 // ── construtores ──────────────────────────────────────────────────────────────
 
-// Helpers para o construtor vector<mpz_t*> — usados na delegação.
 static int mpz_compute_n_limbs(const std::vector<mpz_t *> &numbers)
 {
     int max_digits = 0;
@@ -91,8 +90,6 @@ BatchModCtx::BatchModCtx(const std::vector<uint64_t> &N_all, int n_limbs_, int n
     const size_t pb = (size_t)n_batch * padded * sizeof(Data64);
     const size_t sb = (size_t)n_batch * n_sum * sizeof(Data64);
 
-    // Buffers comuns a todos os backends. (d_m é exclusivo do Montgomery e é
-    // alocado em precompute_reduction; não desperdiça padded-bytes no Barrett.)
     CU(cudaMalloc(&d_N, nb));
     CU(cudaMalloc(&d_ntt_N, pb));
     CU(cudaMalloc(&d_T, sb));
@@ -101,16 +98,11 @@ BatchModCtx::BatchModCtx(const std::vector<uint64_t> &N_all, int n_limbs_, int n
 
     CU(cudaMemcpy(d_N, N_all.data(), nb, cudaMemcpyHostToDevice));
 
-    // NTT(N) pré-computado (usado por REDC e Barrett).
     ntt.ntt_A(d_N, n_limbs);
     CU(cudaMemcpy(d_ntt_N, ntt.d_buf_A, pb, cudaMemcpyDeviceToDevice));
 
-    // Estruturas específicas do backend de redução (reduce_*.cu).
     precompute_reduction(N_all);
-    // Não precisa de cudaDeviceSynchronize aqui: to_residue_batch() começa com um
-    // cudaMemcpy(D2H) no default stream, que garante ordering implicitamente.
 
-    // 1 e (N-1) na forma de trabalho (via GMP, uma única vez).
     std::vector<uint64_t> one_lims((size_t)n_batch * n_limbs, 0);
     for (int i = 0; i < n_batch; i++)
         one_lims[i * n_limbs] = 1;
@@ -118,7 +110,6 @@ BatchModCtx::BatchModCtx(const std::vector<uint64_t> &N_all, int n_limbs_, int n
     std::vector<uint64_t> Nm1_lims((size_t)n_batch * n_limbs, 0);
     for (int i = 0; i < n_batch; i++)
     {
-        // Nm1 = N - 1: subtrai 1 com borrow.
         const uint64_t *Ni = N_all.data() + i * n_limbs;
         uint64_t *out = Nm1_lims.data() + i * n_limbs;
         std::copy(Ni, Ni + n_limbs, out);
@@ -129,7 +120,7 @@ BatchModCtx::BatchModCtx(const std::vector<uint64_t> &N_all, int n_limbs_, int n
                 out[j]--;
                 break;
             }
-            out[j] = 0xFFFF; // borrow
+            out[j] = 0xFFFF;
         }
     }
 
@@ -139,8 +130,9 @@ BatchModCtx::BatchModCtx(const std::vector<uint64_t> &N_all, int n_limbs_, int n
     CU(cudaMemcpy(d_one_res, one_res_h.data(), nb, cudaMemcpyHostToDevice));
     CU(cudaMemcpy(d_Nm1_res, Nm1_res_h.data(), nb, cudaMemcpyHostToDevice));
 
-    for (int i = 0; i <= PERF_RING; i++)
-        CU(cudaEventCreate(&ev_ring[i]));
+    timer.init();
+    perf_mul = build_perf_nodes("mul");
+    perf_sq  = build_perf_nodes("sq");
 }
 
 BatchModCtx::~BatchModCtx()
@@ -151,27 +143,51 @@ BatchModCtx::~BatchModCtx()
     cudaFree(d_one_res);
     cudaFree(d_Nm1_res);
     free_reduction();
-    for (int i = 0; i <= PERF_RING; i++)
-        if (ev_ring[i])
-            cudaEventDestroy(ev_ring[i]);
+    timer.destroy();
 }
 
 // ── perfil ────────────────────────────────────────────────────────────────────
 
-// Sincroniza o último evento gravado e acumula todos os tempos pendentes.
-// Chamada UMA VEZ por modmul_batch / modsq_batch.
 void BatchModCtx::perf_flush(cudaStream_t s)
 {
-    if (!perf_enabled || ring_cur == 0)
-        return;
-    CU(cudaEventSynchronize(ev_ring[ring_cur]));
-    for (int i = 0; i < ring_cur; i++)
-    {
-        float ms = 0;
-        CU(cudaEventElapsedTime(&ms, ev_ring[i], ev_ring[i + 1]));
-        *acc_ring[i] += ms;
-    }
-    ring_cur = 0;
+    timer.flush(s);
+}
+
+// Monta a subárvore de uma via (mul/sq) sob perf_root e retorna o ramo raiz.
+// Estrutura (filhos por índice PerfCtxIdx):
+//   PERF_PROD → "produto" (PerfProdIdx: NTT, PMUL, INTT, CARRY)
+//   PERF_RED  → "reducao" (estrutura interna varia por algoritmo — veja barrett/montgomery)
+//   PERF_FIN  → "finalize" / "cond_sub"
+PerfNode *BatchModCtx::build_perf_nodes(const char *ctx_name)
+{
+    PerfNode *ctx = perf_root.branch(ctx_name);
+
+    // PERF_PROD = child(0)
+    ctx->branch("produto", {"ntt_input", "pmul/psq", "intt_product", "carry_product"});
+
+#if MOD_REDUCTION_ALG == MOD_RED_BARRETT
+    // PERF_RED = child(1): "reducao Barrett"
+    // children: child(0) = shift, child(1) = q2 (4 filhos), child(2) = qn (4 filhos)
+    PerfNode *red = ctx->branch("reducao Barrett");
+    red->branch("shift (A1,q)");
+    red->branch("q2 = A1.mu", {"ntt(A1)", "pmul(mu)", "intt(q2)", "carry(q2)"});
+    red->branch("qn = q.N",   {"ntt(q)",  "pmul(N)",  "intt(qn)", "carry(qn)"});
+
+    // PERF_FIN = child(2): "barrett_finalize"
+    ctx->branch("barrett_finalize", {"sub (T-qn)", "cond_sub N (2x)", "copy_out"});
+#else
+    // PERF_RED = child(1): "reducao Montgomery"
+    // children: child(0) = Multiplicacao (7 filhos), child(1) = Soma (2 filhos), child(2) = shift_right
+    PerfNode *red = ctx->branch("reducao Montgomery");
+    red->branch("Multiplicacao",
+                {"ntt_Tlow", "pmul_Np", "intt_Np", "carry_m", "ntt_m", "pmul_N", "intt_N"});
+    red->branch("Soma", {"vadd", "carry_add"});
+    red->branch("shift_right");
+
+    // PERF_FIN = child(2): "cond_sub" (folha)
+    ctx->branch("cond_sub");
+#endif
+    return ctx;
 }
 
 // ── conversões host de/para a forma de trabalho ───────────────────────────────
@@ -233,73 +249,69 @@ void BatchModCtx::check_passed(const Data64 *d_r, uint8_t *d_passed,
 
 // ── drivers modmul / modsq ────────────────────────────────────────────────────
 
-// out = A · B mod N (na forma de trabalho). Produto polinomial → reduce_batch.
 void BatchModCtx::modmul_batch(const Data64 *d_A, const Data64 *d_B, Data64 *d_out,
                                cudaStream_t s)
 {
-    perf_cur = &perf_mul; // acumula tempos no contexto de multiplicação
-    // Passo 1 — produto polinomial A · B → d_buf_A (raw, sem carry).
+    perf_cur = perf_mul;
+    PerfNode *prod = perf_cur->child(PERF_PROD);
+
     TSTART();
 #if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     ntt.ntt_AB(d_A, d_B, n_limbs, s);
 #elif MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
     ntt.schoolbook_mul(d_A, d_B, n_limbs, s);
 #endif
-    TSTOP(perf_cur->ntt_input);
+    TSTOP(prod->child(PERF_PROD_NTT));
 
 #if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     TSTART();
     ntt.pmul(s);
-    TSTOP(perf_cur->pmul);
+    TSTOP(prod->child(PERF_PROD_PMUL));
     TSTART();
     ntt.intt_A(s);
-    TSTOP(perf_cur->intt_product);
+    TSTOP(prod->child(PERF_PROD_INTT));
 #endif
 
-    // Passo 2: normaliza T (carries) → d_T [n_batch * n_sum].
     TSTART();
     ntt.carry_to_limbs(d_T, n_sum, s);
-    TSTOP(perf_cur->carry_product);
+    TSTOP(prod->child(PERF_PROD_CARRY));
 
-    // Passo 3: redução modular (backend) + finalização.
     reduce_batch(d_out, s);
-
-    perf_flush(s); // único sync por chamada
+    perf_flush(s);
 }
 
-// out = A² mod N. Usa psq (pointwise square) — economiza NTT(B) e metade das muls.
 void BatchModCtx::modsq_batch(const Data64 *d_A, Data64 *d_out, cudaStream_t s)
 {
-    perf_cur = &perf_sq; // acumula tempos no contexto de quadrado
+    perf_cur = perf_sq;
+    PerfNode *prod = perf_cur->child(PERF_PROD);
+
     TSTART();
 #if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     ntt.ntt_A(d_A, n_limbs, s);
 #elif MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
     ntt.schoolbook_sq(d_A, n_limbs, s);
 #endif
-    TSTOP(perf_cur->ntt_input);
+    TSTOP(prod->child(PERF_PROD_NTT));
 
 #if MONT_MUL_ALG == MONT_MUL_ALG_NTT
     TSTART();
     ntt.psq(s);
-    TSTOP(perf_cur->pmul);
+    TSTOP(prod->child(PERF_PROD_PMUL));
     TSTART();
     ntt.intt_A(s);
-    TSTOP(perf_cur->intt_product);
+    TSTOP(prod->child(PERF_PROD_INTT));
 #endif
 
     TSTART();
     ntt.carry_to_limbs(d_T, n_sum, s);
-    TSTOP(perf_cur->carry_product);
+    TSTOP(prod->child(PERF_PROD_CARRY));
 
     reduce_batch(d_out, s);
-
-    perf_flush(s); // único sync por chamada
+    perf_flush(s);
 }
 
 // ── multiplicações sem redução (benchmark) ────────────────────────────────────
 
-// Apenas NTT(A)·NTT(B) + INTT + carry — sem redução modular.
 void BatchModCtx::mul_no_redc_batch(const Data64 *d_A, const Data64 *d_B,
                                     Data64 *d_out, cudaStream_t s)
 {
@@ -309,7 +321,6 @@ void BatchModCtx::mul_no_redc_batch(const Data64 *d_A, const Data64 *d_B,
     cudaStreamSynchronize(s);
 }
 
-// Apenas NTT(A)^2 + INTT + carry — sem redução modular.
 void BatchModCtx::sq_no_redc_batch(const Data64 *d_A, Data64 *d_out, cudaStream_t s)
 {
     ntt.ntt_A(d_A, n_limbs, s);

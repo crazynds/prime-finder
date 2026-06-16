@@ -17,7 +17,7 @@
 #include "candidate.cuh"
 #include "miller_rabin_runner.cuh"
 #include "correctness_tests.cuh"
-#include "bench_ops.cuh"
+#include "helpers/bench_ops.cuh"
 
 using hrc = std::chrono::high_resolution_clock;
 

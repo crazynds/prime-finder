@@ -1,6 +1,6 @@
 // bigint_ntt.cu
 #include "config.h"
-#include "bigint_ntt.cuh"
+#include "ops/mul/ntt_merge.cuh"
 #include <stdexcept>
 #include <string>
 

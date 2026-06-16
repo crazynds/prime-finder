@@ -1,6 +1,6 @@
 #pragma once
-// gmp_helpers.cuh — conversões host entre limbs de 16 bits (little-endian) e mpz_t.
-// Compartilhado por batch_mod_ctx.cu e pelos arquivos de redução (reduce_*.cu).
+// helpers/gmp_helpers.cuh — conversões host entre limbs de 16 bits (little-endian) e mpz_t.
+// Compartilhado por batch_mod_ctx.cu e pelos arquivos de redução (reductions/*.cu).
 
 #include <cstdint>
 #include <gmp.h>

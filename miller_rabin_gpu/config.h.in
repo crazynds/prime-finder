@@ -86,6 +86,9 @@
 
 #define MONT_MUL_ALG @MONT_MUL_ALG@
 
+// Backend de multiplicação (compile-time). Resolvido em ops/mul/multiplier.cuh.
+#define MUL_BACKEND @MUL_BACKEND@
+
 /** --------------------------------------------------
       Algoritmo de redução modular (modmul / modsq)
 ------------------------------------------------------*/

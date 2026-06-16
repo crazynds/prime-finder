@@ -6,7 +6,7 @@
 
 #include <vector>
 #include <gmp.h>
-#include "bigint_ntt.cuh"
+#include "ops/mul/ntt_merge.cuh"
 
 // ── Utilitários GMP ───────────────────────────────────────────────────────────
 
