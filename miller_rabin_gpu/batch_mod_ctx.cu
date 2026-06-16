@@ -86,6 +86,11 @@ BatchModCtx::BatchModCtx(const std::vector<uint64_t> &N_all, int n_limbs_, int n
       ntt(n_limbs_ + MOD_NTT_EXTRA, n_batch_)
 {
     CU(cudaSetDevice(device_id_));
+    // Adota o `padded` REAL do backend de multiplicação: alguns backends arredondam
+    // o tamanho da transformada (ex.: o 4-step exige logn >= 12 e faz over-padding).
+    // Manter ctx.padded == ntt.padded é obrigatório — d_ntt_N/d_ntt_mu/etc. são
+    // copiados de ntt.d_buf_A (stride = ntt.padded). Para o backend merge é no-op.
+    padded = ntt.padded;
     const size_t nb = (size_t)n_batch * n_limbs * sizeof(Data64);
     const size_t pb = (size_t)n_batch * padded * sizeof(Data64);
     const size_t sb = (size_t)n_batch * n_sum * sizeof(Data64);
@@ -256,14 +261,14 @@ void BatchModCtx::modmul_batch(const Data64 *d_A, const Data64 *d_B, Data64 *d_o
     PerfNode *prod = perf_cur->child(PERF_PROD);
 
     TSTART();
-#if MONT_MUL_ALG == MONT_MUL_ALG_NTT
-    ntt.ntt_AB(d_A, d_B, n_limbs, s);
-#elif MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
+#if MUL_ALG == MUL_SCHOOLBOOK
     ntt.schoolbook_mul(d_A, d_B, n_limbs, s);
+#else
+    ntt.ntt_AB(d_A, d_B, n_limbs, s);
 #endif
     TSTOP(prod->child(PERF_PROD_NTT));
 
-#if MONT_MUL_ALG == MONT_MUL_ALG_NTT
+#if MUL_ALG != MUL_SCHOOLBOOK
     TSTART();
     ntt.pmul(s);
     TSTOP(prod->child(PERF_PROD_PMUL));
@@ -286,14 +291,14 @@ void BatchModCtx::modsq_batch(const Data64 *d_A, Data64 *d_out, cudaStream_t s)
     PerfNode *prod = perf_cur->child(PERF_PROD);
 
     TSTART();
-#if MONT_MUL_ALG == MONT_MUL_ALG_NTT
-    ntt.ntt_A(d_A, n_limbs, s);
-#elif MONT_MUL_ALG == MONT_MUL_ALG_SCHOOLBOOK
+#if MUL_ALG == MUL_SCHOOLBOOK
     ntt.schoolbook_sq(d_A, n_limbs, s);
+#else
+    ntt.ntt_A(d_A, n_limbs, s);
 #endif
     TSTOP(prod->child(PERF_PROD_NTT));
 
-#if MONT_MUL_ALG == MONT_MUL_ALG_NTT
+#if MUL_ALG != MUL_SCHOOLBOOK
     TSTART();
     ntt.psq(s);
     TSTOP(prod->child(PERF_PROD_PMUL));

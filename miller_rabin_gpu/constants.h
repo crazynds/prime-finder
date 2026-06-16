@@ -6,11 +6,17 @@
 
 // ── Multiplicação de big-integer (mont_mul / mont_sq) ─────────────────────────
 //
-// MONT_MUL_ALG_NTT        — NTT-based, O(n log n). Produção.
-// MONT_MUL_ALG_SCHOOLBOOK — O(n²) por convolução direta. Apenas para n_limbs
-//                           pequeno (< ~512). Útil como baseline de correctness.
-#define MONT_MUL_ALG_NTT 1
-#define MONT_MUL_ALG_SCHOOLBOOK 2
+// Algoritmo ÚNICO selecionado por MUL_ALG (params.cmake). Define tanto o produto
+// quanto, quando for NTT, qual backend a classe Multiplier resolve (ver
+// ops/mul/multiplier.cuh).
+//
+// MUL_SCHOOLBOOK — O(n²) por convolução direta. Só para n_limbs pequeno; baseline.
+//                  (A redução ainda usa NTT "merge" internamente.)
+// MUL_NTT_MERGE  — GPU-NTT "merge", O(n log n). Produção (padrão).
+// MUL_NTT_4STEP  — GPU-NTT "4step" (radix; transposes). Exige logn ∈ [12,24].
+#define MUL_SCHOOLBOOK 1
+#define MUL_NTT_MERGE 2
+#define MUL_NTT_4STEP 3
 
 // ── Redução modular (modmul / modsq) ──────────────────────────────────────────
 //

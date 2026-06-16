@@ -104,10 +104,12 @@ int main(int argc, char *argv[])
 #else
                 const char *carry_alg = "SEQUENTIAL";
 #endif
-#if MONT_MUL_ALG == MONT_MUL_ALG_NTT
-                const char *mul_alg = "NTT";
-#else
+#if MUL_ALG == MUL_SCHOOLBOOK
                 const char *mul_alg = "SCHOOLBOOK";
+#elif MUL_ALG == MUL_NTT_4STEP
+                const char *mul_alg = "NTT_4STEP";
+#else
+                const char *mul_alg = "NTT_MERGE";
 #endif
 #if MOD_REDUCTION_ALG == MOD_RED_MONTGOMERY
                 const char *mod_red_alg = "MONTGOMERY";

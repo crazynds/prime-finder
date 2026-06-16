@@ -84,10 +84,9 @@
       (mont_mul_batch / mont_sq_batch)
 ------------------------------------------------------*/
 
-#define MONT_MUL_ALG @MONT_MUL_ALG@
-
-// Backend de multiplicação (compile-time). Resolvido em ops/mul/multiplier.cuh.
-#define MUL_BACKEND @MUL_BACKEND@
+// Algoritmo de multiplicação big-int (produto + backend NTT). Resolvido em
+// ops/mul/multiplier.cuh. Valores em constants.h (MUL_SCHOOLBOOK|MUL_NTT_MERGE|MUL_NTT_4STEP).
+#define MUL_ALG @MUL_ALG@
 
 /** --------------------------------------------------
       Algoritmo de redução modular (modmul / modsq)

@@ -1,6 +1,7 @@
 // bigint_ntt.cu
 #include "config.h"
 #include "ops/mul/ntt_merge.cuh"
+#include "ops/mul/ntt_check.cuh"
 #include <stdexcept>
 #include <string>
 
@@ -51,10 +52,18 @@ __global__ static void psq_batch(Data64 *__restrict__ a, int total, Data64 p)
 BigIntNTTBatch::BigIntNTTBatch(int n_limbs_, int n_batch_)
     : n_limbs(n_limbs_), padded(next_pow2_ntt(2 * n_limbs_)), logn(__builtin_ctz(next_pow2_ntt(2 * n_limbs_))), n_batch(n_batch_)
 {
+    // Spec do backend merge (GPU-NTT, Data64): logn ∈ [1, 28].
+    if (logn < 1 || logn > 28)
+        throw std::runtime_error(
+            "[ntt_merge] logn=" + std::to_string(logn) +
+            " fora de [1,28] (limite da GPU-NTT para Data64).");
+
     NTTParameters<Data64> params(logn, ReductionPolynomial::X_N_minus);
     p_val = params.modulus.value;
     n_inv = params.n_inv;
     modulus = params.modulus;
+
+    check_ntt_precision(padded, p_val);
 
     auto fwd_h = params.gpu_root_of_unity_table_generator(params.forward_root_of_unity_table);
     auto inv_h = params.gpu_root_of_unity_table_generator(params.inverse_root_of_unity_table);
@@ -176,7 +185,7 @@ void BigIntNTTBatch::psq_and_intt(cudaStream_t s)
     intt_A(s);
 }
 
-// ── Schoolbook (MONT_MUL_ALG_SCHOOLBOOK) ─────────────────────────────────────
+// ── Schoolbook (MUL_SCHOOLBOOK) ─────────────────────────────────────
 //
 // Convolução polinomial direta O(n²): cada thread calcula um coeficiente de saída.
 // Escreve em d_buf_A com stride=padded — compatível com carry_to_limbs().

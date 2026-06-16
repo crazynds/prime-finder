@@ -4,7 +4,7 @@
 // que os lançam. Os kernels de transformada NTT propriamente ditos ficam em bigint_ntt.cu.
 
 #include "config.h"
-#include "ops/mul/ntt_merge.cuh"
+#include "ops/mul/multiplier.cuh"
 #include <cstdio>
 
 // ── kernels de soma (suporte ao carry) ────────────────────────────────────────
@@ -559,7 +559,7 @@ void carry_stats_print_and_reset()
 
 // ── Métodos de BigIntNTTBatch que lançam os kernels de carry ──────────────────
 
-void BigIntNTTBatch::vadd_raw_buf(Data64 *d_dst, int n_dst, cudaStream_t s)
+void Multiplier::vadd_raw_buf(Data64 *d_dst, int n_dst, cudaStream_t s)
 {
 #if CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE
     int n_tiles = (n_dst + CARRY_TILE - 1) / CARRY_TILE;
@@ -574,7 +574,7 @@ void BigIntNTTBatch::vadd_raw_buf(Data64 *d_dst, int n_dst, cudaStream_t s)
     // SEQUENTIAL: não tem vadd separado — usar add_raw_buf_and_carry diretamente
 }
 
-void BigIntNTTBatch::carry_to_limbs(Data64 *d_out, int n_out, cudaStream_t s)
+void Multiplier::carry_to_limbs(Data64 *d_out, int n_out, cudaStream_t s)
 {
 #if CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE
     constexpr int THR = MR_CARRY_INTER_THR;
@@ -597,7 +597,7 @@ void BigIntNTTBatch::carry_to_limbs(Data64 *d_out, int n_out, cudaStream_t s)
 #endif
 }
 
-void BigIntNTTBatch::carry_after_vadd(Data64 *d_dst, int n_dst, cudaStream_t s)
+void Multiplier::carry_after_vadd(Data64 *d_dst, int n_dst, cudaStream_t s)
 {
 #if CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE
     constexpr int THR = MR_CARRY_INTER_THR;
@@ -615,7 +615,7 @@ void BigIntNTTBatch::carry_after_vadd(Data64 *d_dst, int n_dst, cudaStream_t s)
     // SEQUENTIAL: no-op — carry já foi feito em add_raw_buf_and_carry
 }
 
-void BigIntNTTBatch::add_raw_buf_and_carry(Data64 *d_dst, int n_dst,
+void Multiplier::add_raw_buf_and_carry(Data64 *d_dst, int n_dst,
                                            cudaStream_t s)
 {
 #if CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE || CARRY_NORM_ALG == CARRY_ALG_SINGLE_TILE || CARRY_NORM_ALG == CARRY_ALG_PREFIX_SCAN
@@ -627,7 +627,7 @@ void BigIntNTTBatch::add_raw_buf_and_carry(Data64 *d_dst, int n_dst,
 #endif
 }
 
-void BigIntNTTBatch::add_and_carry(Data64 *d_a, const Data64 *d_b, int n, int n_passes,
+void Multiplier::add_and_carry(Data64 *d_a, const Data64 *d_b, int n, int n_passes,
                                    cudaStream_t s)
 {
 #if CARRY_NORM_ALG == CARRY_ALG_MULTI_TILE

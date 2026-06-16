@@ -2,7 +2,7 @@
 // Operações agnósticas ao algoritmo de redução; lançadores host em shift.cu.
 #pragma once
 
-#include "ops/mul/ntt_merge.cuh" // Data64, LIMB_BITS
+#include "ops/mul/multiplier.cuh" // Data64, LIMB_BITS (via backend selecionado)
 #include <cuda_runtime.h>
 
 namespace ops

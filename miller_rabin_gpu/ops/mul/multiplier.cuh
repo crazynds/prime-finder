@@ -1,8 +1,8 @@
 // ops/mul/multiplier.cuh — Seleção COMPILE-TIME do backend de multiplicação big-int.
 //
 // As reduções (Barrett/Montgomery) e o orquestrador programam contra o tipo
-// `Multiplier` e NUNCA contêm #if por backend. Trocar de backend = trocar
-// MUL_BACKEND em params.cmake e recompilar.
+// `Multiplier` e NUNCA contêm #if por backend. Trocar de algoritmo = trocar
+// MUL_ALG em params.cmake e recompilar.
 //
 // Contrato que todo backend deve expor (mesma superfície do BigIntNTTBatch):
 //   ints: n_limbs, padded, n_sum-equivalente (via padded), n_batch
@@ -20,24 +20,21 @@
 // abortar de forma explícita.
 #pragma once
 
-#include "config.h"
+#include "config.h" // MUL_ALG + identificadores MUL_* (via constants.h)
 
-// Identificadores dos backends (valores comparados via #if).
-#define MUL_NTT_MERGE 1
-#define MUL_NTT_4STEP 2
-#define MUL_FFT_A 3
-#define MUL_FFT_B 4
-
-#ifndef MUL_BACKEND
-#error "MUL_BACKEND não definido (params.cmake → config.h). Use MUL_NTT_MERGE | MUL_NTT_4STEP."
+#ifndef MUL_ALG
+#error "MUL_ALG não definido (params.cmake → config.h). Use MUL_SCHOOLBOOK | MUL_NTT_MERGE | MUL_NTT_4STEP."
 #endif
 
-#if MUL_BACKEND == MUL_NTT_MERGE
-#include "ops/mul/ntt_merge.cuh"   // classe BigIntNTTBatch (backend merge da GPU-NTT)
-using Multiplier = BigIntNTTBatch;
-#elif MUL_BACKEND == MUL_NTT_4STEP
+// Seleção da classe de multiplicação. SCHOOLBOOK e NTT_MERGE compartilham a classe
+// "merge" (BigIntNTTBatch) — a redução modular sempre usa NTT, e a classe merge
+// provê tanto o NTT quanto o schoolbook_*. Só NTT_4STEP troca a classe.
+#if MUL_ALG == MUL_NTT_4STEP
 #include "ops/mul/ntt_4step.cuh"   // classe Ntt4StepBatch (mesma API, algoritmo radix)
 using Multiplier = Ntt4StepBatch;
+#elif MUL_ALG == MUL_NTT_MERGE || MUL_ALG == MUL_SCHOOLBOOK
+#include "ops/mul/ntt_merge.cuh"   // classe BigIntNTTBatch (backend merge da GPU-NTT)
+using Multiplier = BigIntNTTBatch;
 #else
-#error "MUL_BACKEND selecionado ainda não implementado."
+#error "MUL_ALG inválido. Use MUL_SCHOOLBOOK | MUL_NTT_MERGE | MUL_NTT_4STEP."
 #endif

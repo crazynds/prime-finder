@@ -132,6 +132,16 @@ add_test(NAME gpu_tests  COMMAND prime_tests --test)
 
 # ── Miller-Rabin GPU (bench_mr_gpu) ───────────────────────────────────────────
 
+# Algoritmo de multiplicação (params.cmake → MUL_ALG): compila apenas o .cu da
+# classe selecionada. SCHOOLBOOK e NTT_MERGE usam a classe merge; só NTT_4STEP
+# troca para ntt_4step.cu. carry_norm.cu é agnóstico (define Multiplier::).
+if(MUL_ALG STREQUAL "MUL_NTT_4STEP")
+    set(MUL_BACKEND_SRC miller_rabin_gpu/ops/mul/ntt_4step.cu)
+else()
+    set(MUL_BACKEND_SRC miller_rabin_gpu/ops/mul/ntt_merge.cu)
+endif()
+message(STATUS "MUL_ALG = ${MUL_ALG} → ${MUL_BACKEND_SRC}")
+
 # Gera config.h a partir do template + params.cmake
 if(MR_ADVANCED_MONITOR)
     set(MR_ADVANCED_MONITOR 1)
@@ -166,7 +176,7 @@ add_executable(bench_mr_gpu
     miller_rabin_gpu/bench_mr_gpu.cu
     miller_rabin_gpu/helpers/bench_ops.cu
     miller_rabin_gpu/miller_rabin_runner.cu
-    miller_rabin_gpu/ops/mul/ntt_merge.cu
+    ${MUL_BACKEND_SRC}
     miller_rabin_gpu/ops/carry/carry_norm.cu
     miller_rabin_gpu/ops/shift/shift.cu
     miller_rabin_gpu/ops/sub/sub.cu

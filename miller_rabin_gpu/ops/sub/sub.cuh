@@ -8,7 +8,7 @@
 // inteiros por candidato. O borrow_in é resolvido DENTRO do apply (fundido).
 #pragma once
 
-#include "ops/mul/ntt_merge.cuh" // Data64, LIMB_BITS
+#include "ops/mul/multiplier.cuh" // Data64, LIMB_BITS (via backend selecionado)
 #include <cuda_runtime.h>
 
 namespace ops

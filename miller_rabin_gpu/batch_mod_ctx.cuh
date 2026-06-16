@@ -52,7 +52,7 @@ enum PerfProdIdx { PERF_PROD_NTT = 0, PERF_PROD_PMUL = 1, PERF_PROD_INTT = 2, PE
 struct BatchModCtx
 {
     int n_limbs, n_batch, padded, n_sum;
-    Multiplier ntt; // backend de multiplicação (compile-time: MUL_BACKEND)
+    Multiplier ntt; // backend de multiplicação (compile-time: MUL_ALG)
 
     // Per-candidate data, [n_batch * n_limbs]
     Data64 *d_N = nullptr;

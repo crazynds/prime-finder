@@ -1,6 +1,6 @@
 // miller_rabin_runner.cu
 #include "miller_rabin_runner.cuh"
-#include "ops/mul/ntt_merge.cuh"
+#include "ops/mul/multiplier.cuh"
 #include "helpers/time_format.h"
 #include <cstdio>
 #include <chrono>
